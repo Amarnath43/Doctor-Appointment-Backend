@@ -10,7 +10,10 @@ const availabilitySchema=Joi.object({
     
 
 const doctorSchema=Joi.object({
-
+name: Joi.string().min(3).max(20).required(),
+    email:Joi.string().email().required(),
+    phone: Joi.string().pattern(/^[6-9]{1}[0-9]{9}$/).required(),
+    password: Joi.string().min(3).required(),
     specialization: Joi.string().min(3).max(50).required(),
     experience: Joi.number().min(0).max(60).required(),
     hospitalName: Joi.string().min(3).max(50).required(),
