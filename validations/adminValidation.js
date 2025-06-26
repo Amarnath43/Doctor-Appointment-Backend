@@ -8,5 +8,11 @@ const updatePatientStatusSchema=Joi.object({
     status: Joi.string().valid('active', 'blocked', 'pending').required()
 });
 
+const updateHospitalStatusSchema=Joi.object({
+    status: Joi.string().valid('active', 'blocked', 'pending').required()
+});
 
-module.exports={updateDoctorStatusSchema, updatePatientStatusSchema}
+
+
+
+module.exports={updateDoctorStatusSchema, updatePatientStatusSchema, updateHospitalStatusSchema}

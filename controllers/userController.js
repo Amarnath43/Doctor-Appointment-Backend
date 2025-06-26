@@ -1,5 +1,6 @@
 const User = require('../models/userModel')
 const Doctor = require('../models/doctorModel');
+const Hospital=require('../models/hospitalModel')
 const generateToken = require('../utils/generateToken')
 
 const registerUser = async (req, res) => {
@@ -241,5 +242,23 @@ const editProfile=async(req,res)=>{
 }
 
 
+const allHospitals=async(req,res)=>{
+  try
+  {
+    const hospitals=await Hospital.find();
+    if(!hospitals || hospitals.length==0)
+    {
+       return res.status(404).json({ mesage: "Hospitals not found" })
+    }
+    res.status(200).json({message: "hospitals found", hospitals})
 
-module.exports = { registerUser, signin, searchDoctors,editProfile}
+  }
+  catch (err) {
+    console.error('Error fetching hospitals', err);
+    res.status(500).json({ message: 'Error fetching hospitals ' });
+  }
+}
+
+
+
+module.exports = { registerUser, signin, searchDoctors,editProfile, allHospitals}

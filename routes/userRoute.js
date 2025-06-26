@@ -1,6 +1,6 @@
 const express=require('express');
 const router=express.Router();
-const {registerUser,signin, searchDoctors,editProfile}=require('../controllers/userController')
+const {registerUser,signin, searchDoctors,editProfile, allHospitals}=require('../controllers/userController')
 const {myAppointments}=require('../controllers/appointmentController')
 const authMiddleware=require('../middleware/authMiddleware');
 const roleMiddleware=require('../middleware/roleMiddleware');
@@ -17,6 +17,7 @@ router.get('/myappointments',authMiddleware, roleMiddleware(['user']), myAppoint
 
 router.get('/search-doctors', searchDoctors );
 
+router.get('/allhospitals',allHospitals)
 
 
 module.exports=router

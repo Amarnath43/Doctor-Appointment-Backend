@@ -1,0 +1,227 @@
+/*// --- FRONTEND: React Hospital Autocomplete Input ---
+// File: components/HospitalAutocomplete.jsx
+
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+
+const HospitalAutocomplete = ({ onSelectHospital, onInputChange }) => {
+  const [query, setQuery] = useState('');
+  const [suggestions, setSuggestions] = useState([]);
+
+  useEffect(() => {
+    const fetchHospitals = async () => {
+      if (query.trim() === '') return setSuggestions([]);
+      try {
+        const { data } = await axios.get(`/api/hospitals/search?q=${query}`);
+        setSuggestions(data);
+      } catch (err) {
+        console.error('Search failed', err);
+      }
+    };
+    const delayDebounce = setTimeout(fetchHospitals, 300);
+    return () => clearTimeout(delayDebounce);
+  }, [query]);
+
+  const handleChange = (e) => {
+    const input = e.target.value;
+    setQuery(input);
+    if (onInputChange) onInputChange(input);
+  };
+
+  return (
+    <div className="relative w-full">
+      <input
+        type="text"
+        className="border rounded px-3 py-2 w-full"
+        placeholder="Enter hospital name"
+        value={query}
+        onChange={handleChange}
+      />
+      {suggestions.length > 0 && (
+        <ul className="absolute bg-white border rounded shadow-md mt-1 w-full z-10">
+          {suggestions.map((hospital) => (
+            <li
+              key={hospital._id}
+              className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
+              onClick={() => {
+                onSelectHospital(hospital);
+                setQuery(hospital.name);
+                setSuggestions([]);
+              }}
+            >
+              {hospital.name} ({hospital.location})
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
+
+export default HospitalAutocomplete;
+
+
+// --- FRONTEND: Doctor Register Form ---
+// File: pages/DoctorRegister.jsx
+import React, { useState } from 'react';
+import axios from 'axios';
+import HospitalAutocomplete from '../components/HospitalAutocomplete';
+
+const DoctorRegister = () => {
+  const [form, setForm] = useState({
+    name: '', email: '', phone: '', password: '', specialization: '',
+    experience: '', fee: '', bio: '',
+    location: '', googleMapsLink: '', hospitalPhoneNumber: '',
+  });
+  const [hospitalName, setHospitalName] = useState('');
+
+  const handleChange = (e) => {
+    setForm({ ...form, [e.target.name]: e.target.value });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await axios.post('/api/doctors/register', {
+        ...form,
+        hospitalName,
+      });
+      alert('Doctor registered successfully');
+    } catch (err) {
+      console.error(err);
+      alert('Registration failed');
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4 p-6">
+      <input name="name" onChange={handleChange} placeholder="Name" required />
+      <input name="email" onChange={handleChange} placeholder="Email" required />
+      <input name="phone" onChange={handleChange} placeholder="Phone" />
+      <input name="password" onChange={handleChange} placeholder="Password" type="password" required />
+      <input name="specialization" onChange={handleChange} placeholder="Specialization" />
+      <input name="experience" onChange={handleChange} placeholder="Experience" />
+      <input name="fee" onChange={handleChange} placeholder="Consultation Fee" />
+      <textarea name="bio" onChange={handleChange} placeholder="Short Bio" />
+
+      <HospitalAutocomplete
+        onSelectHospital={(hosp) => {
+          setHospitalName(hosp.name);
+          setForm(prev => ({
+            ...prev,
+            location: hosp.location || '',
+          }));
+        }}
+        onInputChange={(val) => setHospitalName(val)}
+      />
+
+      
+      <input name="location" onChange={handleChange} placeholder="Hospital Location (if new)" />
+      <input name="googleMapsLink" onChange={handleChange} placeholder="Google Maps Link (if new)" />
+      <input name="hospitalPhoneNumber" onChange={handleChange} placeholder="Hospital Phone Number (if new)" />
+
+      <button type="submit" className="bg-green-500 text-white px-4 py-2 rounded">
+        Register
+      </button>
+    </form>
+  );
+};
+
+export default DoctorRegister;
+
+
+// --- BACKEND: Hospital Search Route ---
+// File: routes/hospitalRoutes.js
+import express from 'express';
+import Hospital from '../models/Hospital.js';
+import Fuse from 'fuse.js';
+const router = express.Router();
+
+// Search hospitals for autocomplete
+router.get('/search', async (req, res) => {
+  try {
+    const query = req.query.q;
+    const hospitals = await Hospital.find({
+      name: { $regex: query, $options: 'i' },
+    }).limit(10).select('name location');
+    res.json(hospitals);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;
+
+
+// --- BACKEND: Doctor Register Controller ---
+// File: routes/doctorRoutes.js
+import express from 'express';
+import Doctor from '../models/Doctor.js';
+import User from '../models/User.js';
+import Hospital from '../models/Hospital.js';
+import Fuse from 'fuse.js';
+const router = express.Router();
+
+router.post('/register', async (req, res) => {
+  try {
+    const {
+      name, email, phone, password, specialization,
+      experience, hospitalName, location,
+      googleMapsLink, hospitalPhoneNumber,
+      fee, bio,
+    } = req.body;
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'Email already registered' });
+    }
+
+    let hospital = await Hospital.findOne({
+      name: { $regex: hospitalName.trim(), $options: 'i' },
+      location: { $regex: location.trim(), $options: 'i' }
+    });
+
+    if (!hospital) {
+      const hospitals = await Hospital.find();
+      const fuse = new Fuse(hospitals, {
+        keys: ['name', 'location'],
+        threshold: 0.3
+      });
+
+      const results = fuse.search(`${hospitalName} ${location}`);
+      if (results.length > 0) {
+        hospital = results[0].item;
+      } else {
+        hospital = await Hospital.create({
+          name: hospitalName.trim(),
+          location: location.trim(),
+          googleMapsLink,
+          phoneNumber: hospitalPhoneNumber,
+        });
+      }
+    }
+
+    const newUser = new User({ name, email, phone, password, role: 'doctor' });
+    await newUser.save();
+
+    await Doctor.create({
+      userId: newUser._id,
+      specialization,
+      experience,
+      hospital: hospital._id,
+      fee,
+      bio,
+    });
+
+    res.status(201).json({
+      message: 'Doctor registration successful. Waiting for admin approval.',
+      role: newUser.role,
+      status: newUser.status,
+    });
+  } catch (err) {
+    console.error('Error registering doctor:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+export default router;*/

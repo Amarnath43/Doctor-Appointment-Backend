@@ -8,12 +8,13 @@ const {
   updateDoctorStatus,
   getBlockedPatients,
   updatePatientStatus,
-  adminDashboardStats
+  adminDashboardStats,
+  updateHospitalStatus
 } = require('../controllers/adminController');
 
 const {getAllAppointments}=require('../controllers/appointmentController')
 const validateRequest =require('../middleware/validateReqMiddleware');
-const {updateDoctorStatusSchema, updatePatientStatusSchema}=require('../validations/adminValidation')
+const {updateDoctorStatusSchema, updatePatientStatusSchema, updateHospitalStatusSchema}=require('../validations/adminValidation')
 
 const express = require('express');
 const router = express.Router();
@@ -39,6 +40,7 @@ router.get('/blockedpatients', authMiddleware, roleMiddleware(['admin']), getBlo
 // Update patient status (approve/reject/block)
 router.patch('/updatepatientstatus/:id', authMiddleware, roleMiddleware(['admin']),validateRequest(updatePatientStatusSchema),  updatePatientStatus);
 
+router.patch('/updateHospitalstatus/:id', authMiddleware, roleMiddleware(['admin']),validateRequest(updateHospitalStatusSchema),  updateHospitalStatus);
 
 router.get('/appointments', authMiddleware, roleMiddleware(['admin']), getAllAppointments);
 

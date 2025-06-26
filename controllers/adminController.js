@@ -1,37 +1,35 @@
-const User=require('../models/userModel')
+const User = require('../models/userModel')
 const Doctor = require('../models/doctorModel');
-const Appointment=require('../models/appointmentModel')
+const Hospital = require('../models/hospitalModel');
+const Appointment = require('../models/appointmentModel')
 
-const getPendingDoctors=async(req,res)=>{
-    try
-    {
-        const pendingDoctors=await Doctor.find({status:'pending'}).populate('userId','-password');
-        res.json(pendingDoctors)
-    }
-    catch (err) {
+const getPendingDoctors = async (req, res) => {
+  try {
+    const pendingDoctors = await Doctor.find({ status: 'pending' }).populate('userId', '-password');
+    res.json(pendingDoctors)
+  }
+  catch (err) {
     console.error('server error:', err);
     res.status(500).json({ message: 'error from admin panel-server issue' });
   }
 }
 
 
-const updateDoctorStatus=async(req,res)=>{
-    try
-    {
-    const doctorId=req.params.id;
-    const {status}=req.body;
-    const doctor=await Doctor.findById(doctorId);
-    if(!doctor)
-    {
-        return res.status(404).json({message:"Doctor not found"})
+const updateDoctorStatus = async (req, res) => {
+  try {
+    const doctorId = req.params.id;
+    const { status } = req.body;
+    const doctor = await Doctor.findById(doctorId);
+    if (!doctor) {
+      return res.status(404).json({ message: "Doctor not found" })
     }
 
-    doctor.status=status;
+    doctor.status = status;
     await doctor.save();
-    await User.findByIdAndUpdate(doctor.userId, {status:status})
+    await User.findByIdAndUpdate(doctor.userId, { status: status })
     return res.status(200).json({ message: "Doctor status updated successfully" });
-    }
-    catch (err) {
+  }
+  catch (err) {
     console.error('server error:', err);
     res.status(500).json({ message: 'error from admin panel-server issue(upds)' });
   }
@@ -50,13 +48,12 @@ const getAllActiveDoctors = async (req, res) => {
 };
 
 
-const getAllPatients=async (req, res) => {
-    try
-    {
-        const users=await User.find({role:'user',status:'active'}).select('-password');
-        res.status(200).json(users);
-    }
-    catch (err) {
+const getAllPatients = async (req, res) => {
+  try {
+    const users = await User.find({ role: 'user', status: 'active' }).select('-password');
+    res.status(200).json(users);
+  }
+  catch (err) {
     console.error('Error fetching users:', err);
     res.status(500).json({ message: 'Server error' });
   }
@@ -83,48 +80,66 @@ const getBlockedDoctors = async (req, res) => {
   }
 };
 
-const updatePatientStatus=async(req,res)=>{
-   try
-    {
-    const userId=req.params.id;
-    const {status}=req.body;
-    const patient=await User.findById(userId);
-    if(!patient)
-    {
-        return res.status(404).json({message:"Patient not found"})
+const updatePatientStatus = async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const { status } = req.body;
+    const patient = await User.findById(userId);
+    if (!patient) {
+      return res.status(404).json({ message: "Patient not found" })
     }
 
-    patient.status=status;
+    patient.status = status;
     await patient.save();
     return res.status(200).json({ message: "Patient status updated successfully" });
-    }
-    catch (err) {
+  }
+  catch (err) {
     console.error('server error:', err);
     res.status(500).json({ message: 'error from admin panel-server issue(upds)' });
   }
 }
 
+const updateHospitalStatus = async (req, res) => {
+  try {
+    const { status } = req.body;
+    const { hospitalId } = req.params
+    const hospital = await Hospital.findById(hospitalId);
+    if (!hospital) {
+      return res.status(404).json({ message: 'Hospital not found' });
+    }
 
-const adminDashboardStats=async(req,res)=>{
-  try{
-    
-    const totalAppointments=await Appointment.countDocuments();
-    const cancelledAppointments=await Appointment.countDocuments({status: 'cancelled'});
-    const completedAppointments=await Appointment.countDocuments({status: 'completed'});
+    hospital.status = status;
+    await hospital.save();
+    return res.status(200).json({ message: "Hospital status updated successfully" });
+  }
+  catch (err) {
+    console.error('server error:', err);
+    res.status(500).json({ message: 'error from admin panel-server issue(hosp status update)' });
+  }
+}
 
 
-   
-    const totalUsers=await User.countDocuments({role: 'user'});
-    const activeUsers=await User.countDocuments({role: 'user', status:'active'})
-    const blockedUsers=await User.countDocuments({role:'user', status:'blocked'});
 
-     const totalDoctors=await Doctor.countDocuments();
-     const activeDoctors=await Doctor.countDocuments({status: 'active'});
-    const blockedDoctors=await Doctor.countDocuments({status: 'blocked'});
+const adminDashboardStats = async (req, res) => {
+  try {
+
+    const totalAppointments = await Appointment.countDocuments();
+    const cancelledAppointments = await Appointment.countDocuments({ status: 'cancelled' });
+    const completedAppointments = await Appointment.countDocuments({ status: 'completed' });
+
+
+
+    const totalUsers = await User.countDocuments({ role: 'user' });
+    const activeUsers = await User.countDocuments({ role: 'user', status: 'active' })
+    const blockedUsers = await User.countDocuments({ role: 'user', status: 'blocked' });
+
+    const totalDoctors = await Doctor.countDocuments();
+    const activeDoctors = await Doctor.countDocuments({ status: 'active' });
+    const blockedDoctors = await Doctor.countDocuments({ status: 'blocked' });
 
 
     const stats = {
-      
+
       totalAppointments,
       completedAppointments,
       cancelledAppointments,
@@ -148,6 +163,6 @@ const adminDashboardStats=async(req,res)=>{
 
 }
 
-module.exports={getBlockedDoctors, getPendingDoctors, getAllActiveDoctors, getAllPatients, updateDoctorStatus, getBlockedPatients, updatePatientStatus, adminDashboardStats}
+module.exports = { getBlockedDoctors, getPendingDoctors, getAllActiveDoctors, getAllPatients, updateDoctorStatus, getBlockedPatients, updatePatientStatus, adminDashboardStats, updateHospitalStatus }
 
 

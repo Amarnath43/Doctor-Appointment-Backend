@@ -31,8 +31,9 @@ experience:{
     type: Number,
     required: true,
 },
-hospitalName:{
-     type: String,
+hospital:{
+     type: mongoose.Schema.Types.ObjectId,
+     ref: 'Hospital',
     required: true,
 },
 fee: {
