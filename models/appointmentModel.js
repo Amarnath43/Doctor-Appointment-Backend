@@ -12,6 +12,7 @@ const appointmentSchema=new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Doctor'
     },
+   
     date:{
         type: Date,
         required: true
@@ -23,11 +24,25 @@ const appointmentSchema=new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['confirmed', 'cancelled', 'completed'],
-        default: 'confirmed'
-    }
+        enum: ['Confirmed', 'Cancelled', 'Completed'],
+        default: 'Confirmed'
+    },
+    duration: {
+  type: Number,
+  enum: [15, 30],
+  default: 30
+},
+isPaid: { type: Boolean, default: false },
+paymentMode: { type: String,
+    enum: ['Cash', 'Online'],
+    default: 'Cash'
+}
+
 },{
     timestamps: true
 });
+
+appointmentSchema.index({ doctorId: 1, date: 1, slot: 1 }, { unique: true });
+//Ensures a doctor cannot have two bookings for the same time slot on the same day — even under high concurrency.
 
 module.exports=mongoose.model('Appointment',appointmentSchema)

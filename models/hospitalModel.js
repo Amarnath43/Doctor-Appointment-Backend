@@ -22,8 +22,8 @@ const hospitalSchema = new mongoose.Schema({
     ]
   },
   imageUrl: {
-    type: String,
-    default: null,
+    type: [String],
+    default: [],
     trim: true
   },
   createdByDoctor: {
@@ -32,7 +32,7 @@ const hospitalSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'active', 'rejected'],
+    enum: ['pending', 'active', 'blocked'],
     default: 'pending'
   },
   description: {

@@ -29,8 +29,8 @@ const doctorSchema=Joi.object({
 
 const editDoctorProfileSchema=Joi.object({
 name: Joi.string().min(3).max(20).required(),
-    email:Joi.string().email().required(),
-    phone: Joi.string().pattern(/^[6-9]{1}[0-9]{9}$/).required(),
+    email:Joi.string().email(),
+    phone: Joi.string().pattern(/^[6-9]{1}[0-9]{9}$/),
     specialization: Joi.string().min(3).max(50).required(),
     experience: Joi.number().min(0).max(60).required(),
     hospitalName: Joi.string().min(3).max(50).required(),

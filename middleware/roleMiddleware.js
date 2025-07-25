@@ -3,7 +3,7 @@ const roleMiddleware=(allowedRoles)=>
     return (req,res,next)=>{
         if(!req.user)
         {
-            return res.status(400).json({message:"unauthorized access"})
+            return res.status(400).json({message:"Unauthorized access"})
         }
 
         if(!allowedRoles.includes(req.user.role))
