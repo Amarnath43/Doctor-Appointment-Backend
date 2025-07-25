@@ -18,7 +18,7 @@ connectDB();
 
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 
 app.use(cors({
     origin:'*',
@@ -41,7 +41,7 @@ app.use('/', (req,res,next)=>{
 
 // serve everything in ./uploads under the /uploads URL path
 app.use(
-  '/uploads',
+  '/api/uploads',
   express.static(path.join(__dirname, 'uploads'))
 );
 
