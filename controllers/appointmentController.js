@@ -1,10 +1,12 @@
 const Appointment = require('../models/appointmentModel');
-const Doctor = require('../models/doctorModel')
-const mongoose = require('mongoose')
+const Doctor = require('../models/doctorModel');
+const mongoose = require('mongoose');
+const getNextAvailableSlot = require('../utils/getNextAvailableSlot');
 
 const bookAppointment = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
+
   try {
     const { doctorId, date, slot } = req.body;
     const userId = req.user._id;
@@ -16,38 +18,47 @@ const bookAppointment = async (req, res) => {
       { $pull: { 'availability.$.slots': slot } },
       { session }
     );
+
     if (pullRes.modifiedCount === 0) {
       throw { status: 409, message: 'Slot already booked' };
     }
 
-    // 2) Create the appointment
+    // 2) Recalculate nextAvailability
+    const doctor = await Doctor.findById(doctorId).session(session);
+    doctor.availability = doctor.availability.filter(entry => entry.slots.length > 0);
+    doctor.availability.sort((a, b) => new Date(a.date) - new Date(b.date));
+    doctor.nextAvailability = getNextAvailableSlot(doctor.availability);
+    await doctor.save({ session });
+
+    // 3) Create the appointment
     const appointment = new Appointment({
-      userId, doctorId, date: new Date(date), slot, status: 'Confirmed'
+      userId,
+      doctorId,
+      date: new Date(date),
+      slot,
+      status: 'Confirmed'
     });
     await appointment.save({ session });
 
-     // 3) Commit the transaction
+    // 4) Commit the transaction
     await session.commitTransaction();
     session.endSession();
-const fullAppt = await Appointment
-  .findById(appointment._id)
-  .populate({
-    path:   'doctorId',
-    select: 'userId specialization fee profilePicture hospitalId',
-    populate: [
-      // 1) Load doctor.userId
-      { path: 'userId',     select: 'name' },
-      // 2) Load doctor.hospitalId
-      { path: 'hospital', select: 'name location googleMapsLink' }
-    ]
-  })
+
+    const fullAppt = await Appointment
+      .findById(appointment._id)
+      .populate({
+        path: 'doctorId',
+        select: 'userId specialization fee profilePicture hospitalId',
+        populate: [
+          { path: 'userId', select: 'name' },
+          { path: 'hospital', select: 'name location googleMapsLink' }
+        ]
+      });
 
     return res.status(201).json({ message: 'Booked!', fullAppt });
-    
+
   } catch (err) {
-    // Abort both operations
-    console.log(err)
-     if (session.inTransaction()) {
+    if (session.inTransaction()) {
       await session.abortTransaction();
     }
     session.endSession();
@@ -55,32 +66,34 @@ const fullAppt = await Appointment
     if (err.status === 409) {
       return res.status(409).json({ message: err.message });
     }
-    console.error(err);
+
+    console.error('Book appointment error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
 const cancelAppointment = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-
     const appointmentId = req.params.id;
     const userId = req.user._id;
     const role = req.user.role;
 
-    // 1) Load the appointment under session
     const appointment = await Appointment.findById(appointmentId).session(session);
     if (!appointment) {
       await session.abortTransaction();
       return res.status(404).json({ message: "Appointment not found" });
     }
 
-    // 2) Authorization checks
+    // Authorization
     if (role === 'user' && appointment.userId.toString() !== userId.toString()) {
       await session.abortTransaction();
       return res.status(403).json({ message: "You cannot cancel others' appointments" });
     }
+
     if (role === 'doctor') {
       const doctor = await Doctor.findOne({ userId }).session(session);
       if (!doctor || appointment.doctorId.toString() !== doctor._id.toString()) {
@@ -88,33 +101,36 @@ const cancelAppointment = async (req, res) => {
         return res.status(403).json({ message: "You cannot cancel others' appointments" });
       }
     }
-    // (admin skip)
 
-    // 3) Mark the appointment cancelled
+    // Mark appointment as cancelled
     appointment.status = 'Cancelled';
     await appointment.save({ session });
 
-    // 4) Restore the slot into the Doctor.availability
+    // Restore the slot
     const dateStr = appointment.date.toISOString().split('T')[0];
     const dateOnly = new Date(dateStr + 'T00:00:00.000Z');
 
-  const result=  await Doctor.updateOne(
-  { _id: appointment.doctorId, 'availability.date': dateOnly },
-  {
-    $push: {
-      'availability.$.slots': {
-        $each: [appointment.slot],
-        $sort: 1        // ascending; for descending use -1
-      }
-    }
-  },
-  { session }
-);
+    await Doctor.updateOne(
+      { _id: appointment.doctorId, 'availability.date': dateOnly },
+      {
+        $push: {
+          'availability.$.slots': {
+            $each: [appointment.slot],
+            $sort: 1
+          }
+        }
+      },
+      { session }
+    );
 
-    console.log(result)
-    // (optional) check addRes.modifiedCount if you expect the date subdoc to always exist
+    // 🔁 Recalculate nextAvailability
+    const doctor = await Doctor.findById(appointment.doctorId).session(session);
+    doctor.availability = doctor.availability.filter(entry => entry.slots.length > 0);
+    doctor.availability.sort((a, b) => new Date(a.date) - new Date(b.date));
+    doctor.nextAvailability = getNextAvailableSlot(doctor.availability);
+    await doctor.save({ session });
 
-    // 5) Commit both operations
+    // Finalize
     await session.commitTransaction();
     session.endSession();
 
@@ -123,7 +139,6 @@ const cancelAppointment = async (req, res) => {
       appointment
     });
   } catch (err) {
-    // Roll everything back
     await session.abortTransaction();
     session.endSession();
     console.error("Error cancelling appointment:", err);

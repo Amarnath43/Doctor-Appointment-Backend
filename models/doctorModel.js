@@ -50,6 +50,12 @@ const doctorSchema = new mongoose.Schema({
         enum: ['pending', 'active', 'blocked'],
         default: 'pending' // admin approval required
     },
+    nextAvailability: {
+        date: String,
+        time: String,
+        dateTime: String
+    }
+
 }, {
     timestamps: true
 })

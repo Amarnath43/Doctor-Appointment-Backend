@@ -8,6 +8,16 @@ const Joi=require('joi');
         }
         )
         */ 
+
+
+const emailOnlySchema = Joi.object({
+  email: Joi.string().email().required()
+});
+
+const verifyOtpSchema = Joi.object({
+  email: Joi.string().email().required(),
+  otp: Joi.string().length(6).required()
+});
     
 
 const doctorSchema=Joi.object({
@@ -38,4 +48,7 @@ name: Joi.string().min(3).max(20).required(),
     bio: Joi.string().min(10).max(300).required(),
 });
 
-module.exports={doctorSchema,editDoctorProfileSchema}
+
+
+
+module.exports={emailOnlySchema,verifyOtpSchema,doctorSchema,editDoctorProfileSchema}
