@@ -17,15 +17,14 @@ const {
   updateHospital,
   deleteHospitalImage,
   deleteHospital,
-  getAdminAppointments
+  getAdminAppointments,
+  getAdminDashboardSummary,
+  getTodayAppointments
 } = require('../controllers/adminController');
 
 const {getAllAppointments}=require('../controllers/appointmentController')
 const validateRequest =require('../middleware/validateReqMiddleware');
 const {updateDoctorStatusSchema, updateUserStatusSchema, updateHospitalStatusSchema, addHospitalSchema, updateHospitalSchema, editHospitalSchema}=require('../validations/adminValidation');
-const createUploader=require('../middleware/multerMiddleware');
-
-const hospitalUploader = createUploader('hospitals');
 
 const express = require('express');
 const router = express.Router();
@@ -62,27 +61,11 @@ router.get('/pending-hospitals',authMiddleware, roleMiddleware(['admin']), getPe
 router.get('/all-users',authMiddleware, roleMiddleware(['admin']), getAllUsers)
 
 
-router.get('/add-hospital',authMiddleware, roleMiddleware(['admin']), validateRequest(addHospitalSchema), addHospital)
+router.post('/add-hospital',authMiddleware, roleMiddleware(['admin']), validateRequest(addHospitalSchema), addHospital)
 
 router.get('/hospitals', authMiddleware, roleMiddleware(['admin']),getAllHospitals);
 
 
-router.post(
-  '/upload-hospital-image',
-  hospitalUploader.single('image'), // 'image' must match frontend formData key
-  (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ message: 'No file uploaded' });
-      }
-
-      const fileUrl = `/uploads/hospitals/${req.file.filename}`;
-      return res.status(200).json({ url: fileUrl });
-    } catch (err) {
-      return res.status(500).json({ message: 'Upload failed', error: err.message });
-    }
-  }
-);
 
 router.put('/update-hospital/:id', validateRequest(editHospitalSchema), updateHospital);
 router.delete('/delete-hospital-image', deleteHospitalImage);
@@ -102,5 +85,10 @@ router.get(
   getAdminAppointments
 );
 
+router.get('/dashboard-summary', authMiddleware,
+  roleMiddleware(['admin']),getAdminDashboardSummary)
+
+  router.get('/today-appointments', authMiddleware,
+  roleMiddleware(['admin']),getTodayAppointments)
 
 module.exports = router;

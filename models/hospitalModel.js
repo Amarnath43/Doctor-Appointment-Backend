@@ -1,60 +1,64 @@
 const mongoose = require('mongoose');
 
-const hospitalSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: true,
-    trim: true
-  },
-  location: {
-    type: String,
-    trim: true
-  },
-  googleMapsLink: {
-    type: String,
-    trim: true
-  },
-  phoneNumber: {
-    type: String,
-    match: [
-      /^[6-9]{1}[0-9]{9}$/,
-      "Please provide a valid 10-digit Indian phone number starting with 6-9"
-    ]
-  },
-  imageUrl: {
-    type: [String],
-    default: [],
-    trim: true
-  },
-  createdByDoctor: {
-    type: Boolean,
-    default: false
-  },
-  status: {
-    type: String,
-    enum: ['pending', 'active', 'blocked'],
-    default: 'pending'
-  },
-  description: {
-    type:String,
-    trim:true
-  },
-  departments:[
-    {
-      type:String,
-      trim:true
-    }
-  ],
-  facilities: [{
-  type: String,
-  trim: true
-}],
+const hospitalSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },     
+    location: { type: String, trim: true },                 
 
-timings: {
-  weekdays: { type: String },
-  weekends: { type: String }
-}
+    googleMapsLink: { type: String, trim: true },          
 
-}, { timestamps: true });
+    // normalize to digits; validate in Joi
+    phoneNumber: {
+      type: String,
+      set: (v) => (v ? String(v).replace(/\D/g, '') : v),
+    },
+
+    images: { type: [String], default: [] },
+    createdByDoctor: { type: Boolean, default: false },
+
+    status: {
+      type: String,
+      enum: ['pending', 'active', 'blocked'],
+      default: 'pending',
+      index: true,
+    },
+
+    description: { type: String, trim: true },
+
+    departments: {
+      type: [String],
+      default: [],
+      set: (arr) => (arr || []).map((s) => s.trim()).filter(Boolean),
+    },
+    availableTests: {
+      type: [String],
+      default: [],
+      set: (arr) => (arr || []).map((s) => s.trim()).filter(Boolean),
+    },
+    facilities: {
+      type: [String],
+      default: [],
+      set: (arr) => (arr || []).map((s) => s.trim()).filter(Boolean),
+    },
+
+    timings: {
+      weekdays: { type: String, trim: true },
+      weekends: { type: String, trim: true },
+    },
+  },
+  { timestamps: true }
+);
+
+// case-insensitive uniqueness on (name, location)
+hospitalSchema.index(
+  { name: 1, location: 1 },
+  { unique: true, collation: { locale: 'en', strength: 2 } }
+);
+
+// common filter/sort path
+hospitalSchema.index({ status: 1, createdAt: -1 });
+
+// one text index per collection
+hospitalSchema.index({ name: 'text', location: 'text' });
 
 module.exports = mongoose.model('Hospital', hospitalSchema);

@@ -30,7 +30,7 @@ const updateHospitalSchema = Joi.object({
     .pattern(/^[6-9]{1}[0-9]{9}$/)
     .message("Phone number must be a valid 10-digit Indian number starting with 6-9"),
 
-  imageUrl: Joi.array().items(Joi.string().uri()),
+  images: Joi.array().items(Joi.string().pattern(/^\/?hospitals?.+$/)).optional(),
   description: Joi.string().trim(),
   createdByDoctor: Joi.boolean(),
 
@@ -54,9 +54,12 @@ const editHospitalSchema = Joi.object({
 
   description: Joi.string().trim().max(1000).allow(''),
 
-  imageUrl: Joi.array().items(Joi.string().pattern(/^\/uploads\/hospitals\/.+$/)).optional(),
+  images: Joi.array().items(Joi.string().pattern(/^\/?hospitals?.+$/)).optional(),
+
 
   departments: Joi.array().items(Joi.string().trim().min(1)).optional(),
+
+   availableTests: Joi.array().items(Joi.string().trim().min(1)).optional(),
 
   facilities: Joi.array().items(Joi.string().trim().min(1)).optional(),
 

@@ -6,11 +6,13 @@ const User=require('../models/userModel')
 const appointmentSchema=new mongoose.Schema({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'User'
+        ref: 'User',
+        required: true
     },
     doctorId:{
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Doctor'
+        ref: 'Doctor',
+        required: true
     },
    
     date:{
@@ -42,7 +44,19 @@ paymentMode: { type: String,
     timestamps: true
 });
 
-appointmentSchema.index({ doctorId: 1, date: 1, slot: 1 }, { unique: true });
+appointmentSchema.index({ doctorId: 1, date: 1 });
+
+// user history lists
+appointmentSchema.index({ userId: 1, date: -1 });
+
+// status filters fast
+appointmentSchema.index({ status: 1 });
+// Appointment schema
+appointmentSchema.index(
+  { doctorId: 1, date: 1, slot: 1, status: 1 },
+  { unique: true, partialFilterExpression: { status: 'Confirmed' } }
+);
+
 //Ensures a doctor cannot have two bookings for the same time slot on the same day — even under high concurrency.
 
 module.exports=mongoose.model('Appointment',appointmentSchema)

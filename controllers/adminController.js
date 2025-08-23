@@ -4,8 +4,11 @@ const Hospital = require('../models/hospitalModel');
 const Appointment = require('../models/appointmentModel');
 const Admin = require('../models/admin');
 const bcrypt = require('bcryptjs');
+const dayjs = require('dayjs');
 const fs = require('fs');
 const path = require('path');
+const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const {s3} = require('../utils/s3Client');
 
 
 const getPendingDoctors = async (req, res) => {
@@ -143,8 +146,8 @@ const adminDashboardStats = async (req, res) => {
   try {
 
     const totalAppointments = await Appointment.countDocuments();
-    const cancelledAppointments = await Appointment.countDocuments({ status: 'cancelled' });
-    const completedAppointments = await Appointment.countDocuments({ status: 'completed' });
+    const cancelledAppointments = await Appointment.countDocuments({ status: 'Cancelled' });
+    const completedAppointments = await Appointment.countDocuments({ status: 'Completed' });
 
 
 
@@ -290,6 +293,13 @@ const updateHospital = async (req, res) => {
   }
 };
 
+
+
+// Utility: extract S3 key from full image URL
+const extractS3Key = (url) => {
+  const parts = url.split('/');
+  return parts.slice(-2).join('/'); // e.g., 'hospitals/image123.jpg'
+};
 const deleteHospitalImage = async (req, res) => {
   const { url, hospitalId } = req.body;
 
@@ -298,27 +308,32 @@ const deleteHospitalImage = async (req, res) => {
   }
 
   try {
-    // Remove image from hospital's imageUrl array
     const hospital = await Hospital.findById(hospitalId);
     if (!hospital) {
       return res.status(404).json({ message: 'Hospital not found' });
     }
 
-    hospital.imageUrl = hospital.imageUrl.filter(img => img !== url);
+    // 1. Remove image from DB array
+    hospital.images = hospital.images.filter(img => img !== url);
     await hospital.save();
 
-    // Delete file from filesystem
-    const absolutePath = path.join(__dirname, '..', url);
-    if (fs.existsSync(absolutePath)) {
-      fs.unlinkSync(absolutePath);
-    }
+    // 2. Delete from S3
+    const key = extractS3Key(url);
 
-    res.json({ message: 'Image deleted successfully' });
+    const deleteCommand = new DeleteObjectCommand({
+      Bucket: process.env.S3_BUCKET_NAME,
+      Key: key
+    });
+
+    await s3.send(deleteCommand);
+
+    return res.status(200).json({ message: 'Image deleted from hospital and S3' });
   } catch (err) {
-    console.error('Error deleting hospital image:', err);
-    res.status(500).json({ message: 'Failed to delete hospital image' });
+    console.error('Error deleting hospital image from S3:', err);
+    res.status(500).json({ message: 'Failed to delete image from S3' });
   }
 };
+
 
 const deleteHospital = async (req, res) => {
   try {
@@ -346,7 +361,7 @@ const getAdminAppointments = async (req, res) => {
       page = 1, limit = APPTS_PER_PAGE
     } = req.query;
     console.log('→ status filter =', req.query.status);
-    const pageNum  = Math.max(1, parseInt(page, 10));
+    const pageNum = Math.max(1, parseInt(page, 10));
     const pageSize = Math.max(1, parseInt(limit, 10));
 
     // 1) Build the initial match filter
@@ -354,12 +369,12 @@ const getAdminAppointments = async (req, res) => {
     if (startDate || endDate) {
       matchFilter.date = {};
       if (startDate) matchFilter.date.$gte = new Date(startDate);
-      if (endDate)   matchFilter.date.$lte = new Date(endDate);
+      if (endDate) matchFilter.date.$lte = new Date(endDate);
     }
     if (status) {
       matchFilter.status = { $in: status.split(',').map(s => s.trim()) };
     }
-    
+
 
     // 2) Build the post-lookup search match (on patient or doctor name)
     const searchMatch = [];
@@ -437,15 +452,16 @@ const getAdminAppointments = async (req, res) => {
             { $limit: pageSize },
             {
               $project: {
-                _id:              0,
-                id:               '$_id',
-                date:             { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
-                time:             '$slot',
-                status:           '$status',
-                modeOfPayment:    '$paymentMode',
-                patientName:      '$patient.name',
-                doctorName:       '$doctorUser.name',
-                hospitalName:     '$hospital.name',
+                _id: 0,
+                id: '$_id',
+                date: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
+                time: '$slot',
+                status: '$status',
+                modeOfPayment: '$paymentMode',
+                patientName: '$patient.name',
+                doctorName: '$doctorUser.name',
+                specialization: '$doctor.specialization',
+                hospitalName: '$hospital.name',
                 hospitalLocation: '$hospital.location'
               }
             }
@@ -455,10 +471,10 @@ const getAdminAppointments = async (req, res) => {
     ];
 
     // 4) Run it
-    const [ result ] = await Appointment.aggregate(pipeline);
+    const [result] = await Appointment.aggregate(pipeline);
 
     const appointments = result.data;
-    const totalCount  = result.metadata[0]?.total || 0;
+    const totalCount = result.metadata[0]?.total || 0;
 
     // 5) Send back
     return res.json({
@@ -477,11 +493,222 @@ const getAdminAppointments = async (req, res) => {
 };
 
 
+const getAdminDashboardSummary = async (req, res) => {
+  try {
+
+    const startOfDay = dayjs().tz('Asia/Kolkata').startOf('day').utc().toDate();
+    const endOfDay = dayjs().tz('Asia/Kolkata').endOf('day').utc().toDate();
+
+    const matchStage = {
+      date: { $gte: startOfDay, $lte: endOfDay }
+    };
+
+
+    const appointments = await Appointment.aggregate([
+      { $match: matchStage },
+      {
+        $lookup: {
+          from: 'doctors',
+          localField: 'doctorId',
+          foreignField: '_id',
+          as: 'doctor'
+        }
+      },
+      { $unwind: '$doctor' },
+      {
+        $project: {
+          slot: 1,
+          status: 1,
+          isPaid: 1,
+          'doctor.fee': 1,
+        }
+      }
+    ]);
+    console.log(appointments)
+
+    const summary = {
+      confirmed: 0,
+      completed: 0,
+      cancelled: 0,
+      totalAppointments: appointments.length,
+      revenue: 0
+    };
+
+    const confirmed = [];
+
+    console.log(appointments + "sexy")
+
+    appointments.forEach(appt => {
+      const s = appt.status.toLowerCase();
+      if (s === 'confirmed') {
+        summary.confirmed++;
+        confirmed.push(appt);
+      }
+      if (s === 'completed') summary.completed++;
+      if (s === 'cancelled') summary.cancelled++;
+      if (s === 'completed' && appt.isPaid && appt.doctor.fee) {
+        summary.revenue += appt.doctor.fee;
+      }
+    });
+
+    confirmed.sort((a, b) => a.slot.localeCompare(b.slot));
+    const next = confirmed[0];
+
+    // If needed, enrich nextAppointment
+    let nextAppointment = null;
+    if (next) {
+      const populated = await Appointment.findById(next._id)
+        .populate('userId', 'name')
+        .populate({
+          path: 'doctorId',
+          populate: [
+            { path: 'userId', select: 'name' },
+            { path: 'hospital', select: 'name location' }
+          ]
+        });
+
+      nextAppointment = {
+        id: populated._id,
+        date: dayjs(populated.date).format('YYYY-MM-DD'),
+        time: populated.slot,
+        status: populated.status,
+        modeOfPayment: populated.paymentMode,
+        patientName: populated.userId.name,
+        doctorName: populated.doctorId.userId.name,
+        specialization: populated.doctorId.specialization,
+        hospitalName: populated.doctorId.hospital.name,
+        hospitalLocation: populated.doctorId.hospital.location
+      };
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { summary, nextAppointment }
+    });
+
+  } catch (err) {
+    console.error("Error in getDoctorDashboardSummary:", err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+
+const getTodayAppointments = async (req, res) => {
+  try {
+    console.log("hello")
+    const { status, page = 1, limit = 10 } = req.query;
+
+    const startOfDay = dayjs().tz('Asia/Kolkata').startOf('day').utc().toDate();
+    const endOfDay = dayjs().tz('Asia/Kolkata').endOf('day').utc().toDate();
+
+    const matchStage = {
+      date: { $gte: startOfDay, $lte: endOfDay }
+    };
+
+    if (status && status !== 'All') {
+      matchStage.status = status;
+    }
+    console.log(matchStage)
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    console.log(skip)
+
+    const appointmentsAggregation = await Appointment.aggregate([
+      { $match: matchStage },
+      {
+        $facet: {
+          data: [
+            { $sort: { slot: 1 } },
+            { $skip: skip },
+            { $limit: parseInt(limit) },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'userId',
+                foreignField: '_id',
+                as: 'patient'
+              }
+            },
+            { $unwind: '$patient' },
+            {
+              $lookup: {
+                from: 'doctors',
+                localField: 'doctorId',
+                foreignField: '_id',
+                as: 'doctor'
+              }
+            },
+            { $unwind: '$doctor' },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'doctor.userId',
+                foreignField: '_id',
+                as: 'doctorUser'
+              }
+            },
+            { $unwind: '$doctorUser' },
+            {
+              $lookup: {
+                from: 'hospitals',
+                localField: 'doctor.hospital',
+                foreignField: '_id',
+                as: 'hospital'
+              }
+            },
+            { $unwind: '$hospital' },
+            {
+              $project: {
+                _id: 0,
+                id: '$_id',
+                date: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
+                time: '$slot',
+                status: '$status',
+                modeOfPayment: '$paymentMode',
+                patientName: '$patient.name',
+                doctorName: '$doctorUser.name',
+                specialization: '$doctor.specialization',
+                hospitalName: '$hospital.name',
+                hospitalLocation: '$hospital.location'
+              }
+            }
+          ],
+          totalCount: [
+            { $count: 'count' } // ✅ No need to reapply $match
+          ]
+        }
+      }
+    ]);
+    console.log(appointmentsAggregation[0])
+
+    const appointments = appointmentsAggregation[0].data;
+    console.log(appointments)
+    const totalCount = appointmentsAggregation[0].totalCount[0]?.count || 0;
+    const totalPages = Math.ceil(totalCount / parseInt(limit));
+
+    res.status(200).json({
+      success: true,
+      data: appointments,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages,
+        totalCount
+      }
+    });
+
+  } catch (err) {
+    console.error('Error in getTodayAppointments:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+
 
 module.exports = {
   getBlockedDoctors, getPendingDoctors, getAllActiveDoctors, getAllPatients, updateDoctorStatus,
   getBlockedPatients, updateUserStatus, adminDashboardStats, updateHospitalStatus, getPendingHospitals,
-  getAllUsers, addHospital, getAllHospitals, updateHospital, deleteHospitalImage, deleteHospital, getAdminAppointments
+  getAllUsers, addHospital, getAllHospitals, updateHospital, deleteHospitalImage, deleteHospital, getAdminAppointments,
+  getAdminDashboardSummary, getTodayAppointments
 }
 
 

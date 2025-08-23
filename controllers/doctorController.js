@@ -3,12 +3,21 @@ const User = require('../models/userModel');
 const Fuse = require('fuse.js');
 const mongoose = require('mongoose');
 const Hospital = require('../models/hospitalModel');
-const Appointment = require('../models/appointmentModel')
+const Appointment = require('../models/appointmentModel');
+const Review=require('../models/reviewModel');
 const generateOTP = require('../utils/generateOTP')
 const redis = require('../utils/redis');
-const sendEmail = require('../utils/mailer');
 const bcrypt = require('bcryptjs');
 const getNextAvailableSlot = require('../utils/getNextAvailableSlot');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const isSameOrAfter = require('dayjs/plugin/isSameOrAfter');
+dayjs.extend(utc);
+dayjs.extend(isSameOrAfter);
+const {sendOTPEmail}=require('../emails/otp')
+const { sendWelcomeDoctorEmail } = require('../emails/welcomeDoctor');
+
+
 {/**
 const registerDoctor = async (req, res) => {
     let session;
@@ -95,15 +104,15 @@ const registerDoctor = async (req, res) => {
     */}
 
 
-const sendDoctorOtp = async (req, res) => {
+const registerDoctor = async (req, res) => {
   const formData = req.body;
-  const { email,phone } = formData;
+  const { email, phone } = formData;
 
   if (!email) {
     return res.status(400).json({ field: 'email', message: 'Email is required' });
   }
 
-  const existingUser = await User.findOne({$or:[{email},{phone}]})
+  const existingUser = await User.findOne({ $or: [{ email }, { phone }] })
   if (existingUser) {
 
     if (existingUser.phone === phone && existingUser.email != email) {
@@ -125,15 +134,18 @@ const sendDoctorOtp = async (req, res) => {
 
     const updatedFormData = {
       ...formData,
-      otp:hashedOtp,
+      otp: hashedOtp,
       otpExpiry: now + 10 * 60 * 1000, // 10 mins
       lastOtpSentAt: now
     };
 
     await redis.set(redisKey, JSON.stringify(updatedFormData), { EX: 600 });
 
-    await sendEmail(
-      email, otp
+    await sendOTPEmail(
+      email, {
+        otp,
+        name:formData.name
+      }
     );
 
     res.status(200).json({ message: 'OTP sent to doctor email.' });
@@ -165,7 +177,7 @@ const resendDoctorOtp = async (req, res) => {
     }
 
     const newOtp = generateOTP();
-    const hashedOTP=await bcrypt.hash(newOtp,10);
+    const hashedOTP = await bcrypt.hash(newOtp, 10);
     const updatedData = {
       ...parsed,
       otp: hashedOTP,
@@ -188,13 +200,12 @@ const resendDoctorOtp = async (req, res) => {
 
 const verifyDoctorOtpAndRegister = async (req, res) => {
   const { email, otp } = req.body;
+  const redisKey = `register:doctor:data:${(email || '').toLowerCase()}`;
   let session;
 
   try {
-    const redisKey = `register:doctor:data:${email}`;
+    
     const formDataStr = await redis.get(redisKey);
-    console.log(formDataStr)
-
     if (!formDataStr) {
       return res.status(400).json({ message: 'Form session expired. Please re-submit.' });
     }
@@ -202,142 +213,291 @@ const verifyDoctorOtpAndRegister = async (req, res) => {
     const formData = JSON.parse(formDataStr);
     const { otp: storedOtp, otpExpiry } = formData;
 
+  
     if (!storedOtp || !otpExpiry || Date.now() > otpExpiry) {
       return res.status(400).json({ message: 'OTP expired. Please request a new one.' });
     }
-
-    const match=await bcrypt.compare(otp, storedOtp)
-    if (!match) {
+    const otpOk = await bcrypt.compare(otp, storedOtp);
+    if (!otpOk) {
       return res.status(400).json({ message: 'Invalid OTP.' });
     }
 
-    await redis.del(redisKey); // cleanup
-
+  
     const {
-      name, phone, password, specialization, experience,
-      hospitalName, location, googleMapsLink, hospitalPhoneNumber,
-      fee, bio
-    } = formData;
-
-    session = await mongoose.startSession();
-    session.startTransaction();
-
-    // Hospital logic
-    let hospital = await Hospital.findOne({ name: { $regex: `^${hospitalName}$`, $options: 'i' } }).session(session);
-    if (!hospital) {
-      const allHospitals = await Hospital.find();
-      const fuse = new Fuse(allHospitals, { keys: ['name', 'location'], threshold: 0.3 });
-      const result = fuse.search(hospitalName);
-      if (result.length > 0) hospital = result[0].item;
-    }
-
-    if (!hospital) {
-      const created = await Hospital.create([{
-        name: hospitalName,
-        location,
-        googleMapsLink,
-        phoneNumber: hospitalPhoneNumber,
-        createdByDoctor: true
-      }], { session });
-      hospital = created[0];
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = new User({
       name,
-      email,
       phone,
-      password: hashedPassword,
-      role: 'doctor',
-      isVerified: true
-    });
-    newUser._passwordIsHashed = true;
-
-    await newUser.save({ session });
-
-    await Doctor.create([{
-      userId: newUser._id,
+      password,
       specialization,
       experience,
-      hospital: hospital._id,
+      hospitalId,
+      hospitalName,
+      location,
+      googleMapsLink,
+      hospitalPhoneNumber,
       fee,
       bio
-    }], { session });
+    } = formData;
 
-    await session.commitTransaction();
-    session.endSession();
+    const normEmail = (formData.email || email || '').toLowerCase().trim();
+    const normPhone = (phone || '').trim();
 
-    res.status(201).json({
-      message: 'Doctor registration successful. Waiting for admin approval.',
-      role: newUser.role,
-      status: newUser.status
+   
+    const existingUser = await User.findOne({
+      $or: [{ email: normEmail }, { phone: normPhone }]
+    }).select('_id email phone');
+    if (existingUser) {
+      return res.status(409).json({ message: 'Email or phone already registered.' });
+    }
+
+   
+    session = await mongoose.startSession();
+    await session.withTransaction(async () => {
+      
+      let hospitalDoc = null;
+
+      if (hospitalId) {
+        hospitalDoc = await Hospital.findById(hospitalId).session(session).select('_id');
+        if (!hospitalDoc) {
+          throw new Error('Selected hospital no longer exists.');
+        }
+      } else {
+       
+        hospitalDoc = await Hospital.findOne({
+          name: { $regex: `^${hospitalName}$`, $options: 'i' }
+        }).session(session).select('_id');
+
+       
+        if (!hospitalDoc) {
+          const [created] = await Hospital.create([{
+            name: hospitalName?.trim(),
+            location: location?.trim() || '',
+            googleMapsLink: googleMapsLink?.trim() || '',
+            phoneNumber: hospitalPhoneNumber?.trim() || '',
+            createdByDoctor: true,
+            isActive: true
+          }], { session });
+          hospitalDoc = created;
+        }
+      }
+
+     
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const user = new User({
+        name: name?.trim(),
+        email: normEmail,
+        phone: normPhone,
+        password: hashedPassword,
+        role: 'doctor',
+        isVerified: true
+      });
+     
+      user._passwordIsHashed = true;
+      await user.save({ session });
+
+   
+      await Doctor.create([{
+        userId: user._id,
+        specialization: specialization?.trim(),
+        experience: Number(experience) || 0,
+        hospital: hospitalDoc._id,
+        fee: Number(fee),
+        bio: bio?.trim(),
+        status: 'pending' 
+      }], { session });
+
+     
+      await redis.del(redisKey);
+
+    
+      (async () => {
+        try {
+          await sendWelcomeDoctorEmail(user.email, { name: user.name });
+        } catch (e) {
+          console.error('Welcome email failed:', e?.message || e);
+        }
+      })();
+
+      res.status(201).json({
+        message: 'Doctor registration successful. Waiting for admin approval.',
+        role: user.role,
+        status: 'pending'
+      });
     });
 
   } catch (err) {
     console.error('verifyDoctorOtpAndRegister error:', err);
-    if (session) {
-      await session.abortTransaction();
-      session.endSession();
+    // If response not sent yet
+    if (!res.headersSent) {
+      res.status(500).json({ message: 'Server error during OTP verification or registration.' });
     }
-    res.status(500).json({ message: 'Server error during OTP verification or registration.' });
+  } finally {
+    if (session) session.endSession();
   }
 };
+
+
+
+// POST: Set doctor availability
 
 
 const doctorAvailability = async (req, res) => {
   try {
     const doctorId = req.user._id;
-    const availabilityUpdates = req.body;
+    const updates = Array.isArray(req.body) ? req.body : []; // [{date, slots}, ...]
 
     const doctor = await Doctor.findOne({ userId: doctorId });
-    if (!doctor) {
-      return res.status(404).json({ message: "Doctor not found" });
+    if (!doctor) return res.status(404).json({ message: 'Doctor not found' });
+
+    const now = dayjs.utc();
+
+    // Map: dateStr -> desired slots (may be empty)
+    const desired = new Map();
+    const updateDates = [];
+
+    for (const u of updates) {
+      const dateStr = dayjs.utc(u.date).format('YYYY-MM-DD');
+      updateDates.push(dateStr);
+      desired.set(dateStr, Array.isArray(u.slots) ? u.slots : []);
     }
 
-    // Update or add availability entries
-    availabilityUpdates.forEach(({ date, slots }) => {
-      const formattedDate = new Date(date).toISOString().split('T')[0];
+    // Fetch booked for all updated days in one query
+    const dateObjs = updateDates.map(ds => dayjs.utc(ds).startOf('day').toDate());
+    const appts = await Appointment.find({
+      doctorId: doctor._id,
+      date: { $in: dateObjs },
+      status: 'Confirmed'
+    }).select('date slot');
+console.log("vbn")
+    console.log(appts)
+    const bookedMap = new Map(); // dateStr -> Set(slots)
+    for (const a of appts) {
+      const ds = dayjs.utc(a.date).format('YYYY-MM-DD');
+      if (!bookedMap.has(ds)) bookedMap.set(ds, new Set());
+      bookedMap.get(ds).add(a.slot);
+    }
 
-      const existing = doctor.availability.find(
-        (entry) => new Date(entry.date).toISOString().split('T')[0] === formattedDate
-      );
+    // Turn current availability into a map
+    const curMap = new Map(); // dateStr -> Set(slots)
+    for (const entry of doctor.availability) {
+      const ds = dayjs.utc(entry.date).format('YYYY-MM-DD');
+      curMap.set(ds, new Set(entry.slots));
+    }
 
-      const cleanedSlots = slots.map(slot => slot.trim()).sort();
-
-      if (existing) {
-        existing.slots = cleanedSlots;
-      } else {
-        doctor.availability.push({ date: formattedDate, slots: cleanedSlots });
+    // Apply each updated date (including empty arrays = clear)
+    for (const [ds, wantedSlots] of desired.entries()) {
+      const dayStart = dayjs.utc(ds).startOf('day');
+      if (dayStart.isBefore(now.startOf('day'))) {
+        // ignore attempts to change past days
+        continue;
       }
-    });
 
-    // Filter past dates and empty slots
-    const now = new Date();
-    doctor.availability = doctor.availability
-      .filter(entry =>
-        new Date(entry.date) >= new Date(now.toDateString()) &&
-        entry.slots.length > 0
-      );
+      const booked = bookedMap.get(ds) || new Set();
+      const nextSet = new Set();
 
-    // Sort by date
-    doctor.availability.sort((a, b) => new Date(a.date) - new Date(b.date));
+      for (const slot of wantedSlots) {
+        const slotTime = dayjs.utc(`${ds}T${slot}`);
+        if (slotTime.isAfter(now) && !booked.has(slot)) nextSet.add(slot);
+      }
 
-    // Recalculate next slot
+      // If wanted was empty, this becomes empty => clears the day
+      curMap.set(ds, nextSet);
+    }
+
+    // Rebuild array; keep also any days we didn’t touch (future only)
+    const newAvail = [];
+    for (const [ds, set] of curMap.entries()) {
+      const slots = Array.from(set).sort();
+      const dateObj = dayjs.utc(ds).startOf('day').toDate();
+      const isFuture = dayjs.utc(dateObj).isSameOrAfter(now.startOf('day'));
+      if (isFuture && slots.length > 0) {
+        newAvail.push({ date: dateObj, slots });
+      }
+    }
+
+    newAvail.sort((a, b) => a.date - b.date);
+    doctor.availability = newAvail;
     doctor.nextAvailability = getNextAvailableSlot(doctor.availability);
-
     await doctor.save();
 
-    res.status(200).json({
-      message: 'Availability updated successfully',
-      doctor
-    });
-
+    return res.status(200).json({ message: 'Availability updated successfully' });
   } catch (err) {
-    console.error('Error updating availability:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Error setting availability:', err);
+    return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+const generateTimeSlots = (start = '09:00', end = '21:00', duration = 30) => {
+  const slots = [];
+  let current = dayjs.utc(`${dayjs.utc().format('YYYY-MM-DD')}T${start}`);
+  const endTime = dayjs.utc(`${dayjs.utc().format('YYYY-MM-DD')}T${end}`);
+
+  while (current.isBefore(endTime)) {
+    slots.push(current.format('HH:mm'));
+    current = current.add(duration, 'minute');
+  }
+
+  return slots;
+};
+
+const getDoctorAvailability = async (req, res) => {
+  try {
+    const doctorId = req.user._id;
+    const doctor = await Doctor.findOne({ userId: doctorId });
+    if (!doctor) return res.status(404).json({ message: 'Doctor not found' });
+
+    const now = dayjs.utc();
+    const start = now.startOf('day');
+    const end = now.add(6, 'day').endOf('day');
+
+    const appointments = await Appointment.find({
+      doctorId: doctor._id,
+      date: { $gte: start.toDate(), $lte: end.toDate() },
+      status: 'Confirmed'
+    });
+
+    const booked = {};
+    for (const appt of appointments) {
+      const dateStr = dayjs.utc(appt.date).format('YYYY-MM-DD');
+      if (!booked[dateStr]) booked[dateStr] = [];
+      booked[dateStr].push(appt.slot);
+    }
+
+    const available = doctor.availability.map((entry) => ({
+      date: dayjs.utc(entry.date).format('YYYY-MM-DD'),
+      slots: entry.slots
+    }));
+
+    const vacant = {};
+
+    for (let i = 0; i < 7; i++) {
+      const day = now.add(i, 'day');
+      const dateStr = day.format('YYYY-MM-DD');
+
+      const allSlots = generateTimeSlots('09:00', '21:00'); // customize as needed
+      const bookedSet = new Set(booked[dateStr] || []);
+      const availableSet = new Set(
+        available.find(d => d.date === dateStr)?.slots || []
+      );
+
+      vacant[dateStr] = allSlots.filter(slot => {
+        const slotTime = dayjs.utc(`${dateStr}T${slot}`);
+        return (
+          slotTime.isAfter(now) &&
+          !bookedSet.has(slot) &&
+          !availableSet.has(slot)
+        );
+      });
+    }
+
+    return res.status(200).json({ available, booked, vacant });
+  } catch (err) {
+    console.error('Error fetching availability:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
 
 
 const getDoctorAnalytics = async (req, res) => {
@@ -382,7 +542,9 @@ const getDoctorAnalytics = async (req, res) => {
   }
 };
 
-const existingDoctorSlots = async (req, res) => {
+{
+  /*
+  const existingDoctorSlots = async (req, res) => {
   try {
     const id = req.user._id;
     const doctor = await Doctor.findOne({ userId: id });
@@ -400,6 +562,10 @@ const existingDoctorSlots = async (req, res) => {
   }
 
 }
+   */
+
+}
+
 
 
 const getDoctorDetails = async (req, res) => {
@@ -452,7 +618,6 @@ const getDoctorDetails = async (req, res) => {
   }
 };
 
-
 const updateAppointmentStatus = async (req, res) => {
   try {
     const { id } = req.params;
@@ -463,15 +628,21 @@ const updateAppointmentStatus = async (req, res) => {
       return res.status(400).json({ message: 'Invalid status' });
     }
 
-    const appointment = await Appointment.findByIdAndUpdate(
-      id,
-      { status },
-      { new: true }
-    );
-
+    // Find the appointment
+    const appointment = await Appointment.findById(id);
     if (!appointment) {
       return res.status(404).json({ message: 'Appointment not found' });
     }
+
+    // Update status
+    appointment.status = status;
+
+    // If marked as completed, mark it as paid
+    if (status === 'Completed') {
+      appointment.isPaid = true;
+    }
+
+    await appointment.save();
 
     res.json({ message: 'Status updated', appointment });
   } catch (error) {
@@ -480,5 +651,289 @@ const updateAppointmentStatus = async (req, res) => {
   }
 };
 
-module.exports = { sendDoctorOtp, resendDoctorOtp, verifyDoctorOtpAndRegister, doctorAvailability, getDoctorAnalytics, existingDoctorSlots, getDoctorDetails, updateAppointmentStatus };
+
+const getDoctorDashboardSummary = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const doctor = await Doctor.findOne({ userId });
+    if (!doctor) return res.status(404).json({ success: false, message: 'Doctor not found' });
+
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    const matchStage = { doctorId: doctor._id, date: today };
+
+    const appointments = await Appointment.aggregate([
+      { $match: matchStage },
+      {
+        $lookup: {
+          from: 'doctors',
+          localField: 'doctorId',
+          foreignField: '_id',
+          as: 'doctor'
+        }
+      },
+       { $unwind: '$doctor' },
+      {
+        $project: {
+          slot: 1,
+          status: 1,
+          isPaid: 1,
+          'doctor.fee': 1,
+        }
+      }
+    ]);
+    console.log(appointments)
+
+    const summary = {
+      confirmed: 0,
+      completed: 0,
+      cancelled: 0,
+      totalAppointments: appointments.length,
+      revenue: 0
+    };
+
+    const confirmed = [];
+
+    console.log(appointments+"sexy")
+
+    appointments.forEach(appt => {
+      const s = appt.status.toLowerCase();
+      if (s === 'confirmed') {
+        summary.confirmed++;
+        confirmed.push(appt);
+      }
+      if (s === 'completed') summary.completed++;
+      if (s === 'cancelled') summary.cancelled++;
+      if (s === 'completed' && appt.isPaid && appt.doctor.fee) {
+        summary.revenue += appt.doctor.fee;
+      }
+    });
+
+    confirmed.sort((a, b) => a.slot.localeCompare(b.slot));
+    const next = confirmed[0];
+
+    // If needed, enrich nextAppointment
+    let nextAppointment = null;
+    if (next) {
+      const populated = await Appointment.findById(next._id)
+        .populate('userId', 'name')
+        .populate({
+          path: 'doctorId',
+          populate: [
+            { path: 'userId', select: 'name' },
+            { path: 'hospital', select: 'name location' }
+          ]
+        });
+
+      nextAppointment = {
+        id: populated._id,
+        date: dayjs(populated.date).format('YYYY-MM-DD'),
+        time: populated.slot,
+        status: populated.status,
+        modeOfPayment: populated.paymentMode,
+        patientName: populated.userId.name,
+        doctorName: populated.doctorId.userId.name,
+        specialization: populated.doctorId.specialization,
+        hospitalName: populated.doctorId.hospital.name,
+        hospitalLocation: populated.doctorId.hospital.location
+      };
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { summary, nextAppointment }
+    });
+
+  } catch (err) {
+    console.error("Error in getDoctorDashboardSummary:", err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+
+const getTodayAppointments = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { status, page = 1, limit = 10 } = req.query;
+
+    const doctor = await Doctor.findOne({ userId });
+    if (!doctor) return res.status(404).json({ success: false, message: 'Doctor not found' });
+    console.log(doctor._id)
+    // Ensure date matches midnight UTC
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    // Filter match
+    const matchStage = {
+      doctorId: doctor._id,
+      date: today
+    };
+    if (status && status !== 'All') {
+      matchStage.status = status;
+    }
+    console.log(matchStage)
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    console.log(skip)
+
+    const appointmentsAggregation = await Appointment.aggregate([
+      { $match: matchStage },
+      {
+        $facet: {
+          data: [
+            { $sort: { slot: 1 } },
+            { $skip: skip },
+            { $limit: parseInt(limit) },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'userId',
+                foreignField: '_id',
+                as: 'patient'
+              }
+            },
+            { $unwind: '$patient' },
+            {
+              $lookup: {
+                from: 'doctors',
+                localField: 'doctorId',
+                foreignField: '_id',
+                as: 'doctor'
+              }
+            },
+            { $unwind: '$doctor' },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'doctor.userId',
+                foreignField: '_id',
+                as: 'doctorUser'
+              }
+            },
+            { $unwind: '$doctorUser' },
+            {
+              $lookup: {
+                from: 'hospitals',
+                localField: 'doctor.hospital',
+                foreignField: '_id',
+                as: 'hospital'
+              }
+            },
+            { $unwind: '$hospital' },
+            {
+              $project: {
+                _id: 0,
+                id: '$_id',
+                date: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
+                time: '$slot',
+                status: '$status',
+                modeOfPayment: '$paymentMode',
+                patientName: '$patient.name',
+                doctorName: '$doctorUser.name',
+                specialization: '$doctor.specialization',
+                hospitalName: '$hospital.name',
+                hospitalLocation: '$hospital.location'
+              }
+            }
+          ],
+          totalCount: [
+            { $count: 'count' } // ✅ No need to reapply $match
+          ]
+        }
+      }
+    ]);
+    console.log(appointmentsAggregation[0])
+
+    const appointments = appointmentsAggregation[0].data;
+    console.log(appointments)
+    const totalCount = appointmentsAggregation[0].totalCount[0]?.count || 0;
+    const totalPages = Math.ceil(totalCount / parseInt(limit));
+
+    res.status(200).json({
+      success: true,
+      data: appointments,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages,
+        totalCount
+      }
+    });
+
+  } catch (err) {
+    console.error('Error in getTodayAppointments:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// GET /doctor/reviews  (doctor panel)
+const listMyDoctorReviews = async (req, res) => {
+  try {
+    
+
+    const userId = req.user._id; 
+    const doctor=await Doctor.findOne({userId});
+    const doctorId=doctor._id;
+
+    const pageRaw = Number(req.query.page);
+    const limitRaw = Number(req.query.limit);
+    const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+    const limit = Number.isFinite(limitRaw) ? Math.min(100, Math.max(1, limitRaw)) : 20;
+    const skip = (page - 1) * limit;
+
+    const {
+      status = 'all',           // 'all' | 'approved' | 'pending' | 'rejected'
+      needsReply,               // 'true' | 'false'
+      minRating,
+      maxRating,
+      sort = 'newest',          // 'newest' | 'oldest' | 'lowest' | 'highest'
+    } = req.query;
+
+    const q = { doctorId };
+    if (status !== 'all') q.status = status;
+
+    if (needsReply === 'true') q['doctor_reply.text'] = { $exists: false };
+    if (needsReply === 'false') q['doctor_reply.text'] = { $exists: true };
+
+    if (minRating || maxRating) {
+      q.rating_overall = {};
+      if (minRating) q.rating_overall.$gte = Number(minRating);
+      if (maxRating) q.rating_overall.$lte = Number(maxRating);
+    }
+
+    const sortMap = {
+      newest:  { createdAt: -1 },
+      oldest:  { createdAt: 1 },
+      lowest:  { rating_overall: 1, createdAt: -1 },
+      highest: { rating_overall: -1, createdAt: -1 },
+    };
+
+    const [items, total] = await Promise.all([
+  Review.find(q)
+    .sort(sortMap[sort] || sortMap.newest)
+    .skip(skip)
+    .limit(limit)
+    .populate({
+      path: 'patientId',       // field in Review model
+      select: 'name profilePicture', // only send required fields
+    })
+    .lean(),
+  Review.countDocuments(q),
+]);
+
+
+    return res.json({ items, total, page, limit });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+
+
+module.exports = {
+  registerDoctor, resendDoctorOtp, verifyDoctorOtpAndRegister, doctorAvailability, getDoctorAnalytics,
+  getDoctorDetails, updateAppointmentStatus, getDoctorAvailability, getDoctorDashboardSummary, getTodayAppointments, listMyDoctorReviews
+};
 

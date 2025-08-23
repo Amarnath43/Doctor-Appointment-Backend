@@ -4,17 +4,30 @@ const Hospital = require('../models/hospitalModel')
 const generateToken = require('../utils/generateToken');
 const generateOTP = require('../utils/generateOTP')
 const Appointment = require('../models/appointmentModel')
-const sendOTPEmail = require('../utils/mailer');
 const bcrypt = require('bcryptjs')
 const redis = require('../utils/redis');
+const { deleteImageFromS3 } = require('../utils/s3Client');
+const { makePublicUrlFromKey } = require('../utils/s3PublicUrl');
+const mongoose = require('mongoose');
+const {sendOTPEmail}=require('../emails/otp')
+const { sendWelcomeUserEmail } = require('../emails/welcomeUser.js');
+
+
 
 const registerUser = async (req, res) => {
   try {
     const { name, email, phone, password } = req.body;
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({
+      $or: [{ email }, { phone }]
+    });
 
     if (existingUser) {
-      return res.status(400).json({ message: 'Email already registered' });
+      if (existingUser.email === email) {
+        return res.status(400).json({ message: "Email already registered" });
+      }
+      if (existingUser.phone === phone) {
+        return res.status(400).json({ message: "Phone Number already registered" });
+      }
     }
 
     const otp = generateOTP();
@@ -36,7 +49,8 @@ const registerUser = async (req, res) => {
       console.error('❌ Redis Error:', err);
       return res.status(500).json({ message: 'Internal error while saving OTP' });
     }
-    sendOTPEmail(email, otp)
+    console.log(otp, name)
+    await sendOTPEmail(email, { otp, name });
 
     res.status(201).json({ message: 'OTP sent to email for verification' });
   }
@@ -48,21 +62,26 @@ const registerUser = async (req, res) => {
 };
 
 const verifyOTP = async (req, res) => {
-  const { email, otp, isLoginFlow } = req.body;
+  let { email, otp, isLoginFlow } = req.body;
 
   try {
+    email = String(email).toLowerCase();
+    otp = String(otp);
     const key = isLoginFlow ? `signin:${email}` : `signup:${email}`;
     const tempData = await redis.get(key);
-
+    console.log(tempData)
     if (!tempData)
       return res.status(400).json({ message: 'OTP expired or not requested' });
 
     const parsed = JSON.parse(tempData);
-    console.log(parsed)
+    
 
-    if (parsed.otpExpiry < Date.now()) {
+     const expiryMs = typeof parsed.otpExpiry === "string"
+      ? new Date(parsed.otpExpiry).getTime()
+      : Number(parsed.otpExpiry);
+    if (expiryMs < Date.now()) {
       await redis.del(key);
-      return res.status(400).json({ message: 'OTP expired' });
+      return res.status(400).json({ message: "OTP expired" });
     }
 
     const isMatch = await bcrypt.compare(otp, parsed.otp);
@@ -109,33 +128,6 @@ const verifyOTP = async (req, res) => {
         responseData.experience = doctor.experience;
         responseData.fee = doctor.fee;
         responseData.bio = doctor.bio;
-        const now = new Date();
-        const today = new Date();
-        today.setHours(0, 0, 0, 0); // Normalize to midnight
-
-        const maxDate = new Date();
-        maxDate.setDate(maxDate.getDate() + 7); // Limit to next 7 days
-
-        const upcomingAvailability = doctor.availability.filter(entry => {
-          const entryDate = new Date(entry.date);
-
-          // Exclude past dates
-          if (entryDate < today) return false;
-
-          // Exclude beyond 7 days
-          if (entryDate > maxDate) return false;
-
-          // Filter out past time slots within the date
-          entry.slots = entry.slots.filter(slot => {
-            const slotTime = new Date(`${entry.date}T${slot}`); // Assumes slot is 'HH:mm'
-            return slotTime > now;
-          });
-
-          return entry.slots.length > 0; // Keep only dates with valid slots
-        });
-
-        responseData.availability = upcomingAvailability;
-
 
         if (doctor.hospital) {
           responseData.hospital = {
@@ -156,6 +148,7 @@ const verifyOTP = async (req, res) => {
 
     } else {
       // 📝 Signup flow
+      const role = parsed.role || "user";
       const user = new User({
         name: parsed.name,
         email: parsed.email,
@@ -167,6 +160,11 @@ const verifyOTP = async (req, res) => {
       user._passwordIsHashed = true,
         await user.save();
       await redis.del(key);
+
+      
+  await sendWelcomeUserEmail(user.email, { name: user.name });
+
+
       return res.status(201).json({ message: 'User registered successfully' });
     }
 
@@ -199,6 +197,7 @@ const resendOTP = async (req, res) => {
     }
 
     const parsed = JSON.parse(redisData);
+    
 
     // Rate limit: block resend if within 60 seconds
     if (parsed.lastOtpSentAt && Date.now() - parsed.lastOtpSentAt < 60000) {
@@ -223,7 +222,8 @@ const resendOTP = async (req, res) => {
     await redis.set(key, JSON.stringify(updatedData), 'EX', 600);
 
     // Send via email
-    await sendOTPEmail(email, newOtp);
+    
+    await sendOTPEmail(email, { otp:newOtp });
 
     return res.status(200).json({ message: 'OTP resent successfully' });
 
@@ -238,7 +238,11 @@ const resendOTP = async (req, res) => {
 
 const signin = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    let { email, password } = req.body;
+
+    email = String(email || '').trim().toLowerCase();
+    password = String(password || '');
+
 
     if (!email || !password) {
       return res.status(400).json({
@@ -279,9 +283,9 @@ const signin = async (req, res) => {
     };
 
     await redis.set(`signin:${email}`, JSON.stringify(redisData), 'EX', 600);
-    await sendOTPEmail(email, otp);
+    await sendOTPEmail(email, {otp,name:existing.name});
 
-    res.status(200).json({ message: 'OTP sent to email for login verification' });
+    res.status(200).json({ message: 'OTP sent to email for login verification', role:existing.role });
 
 
   } catch (err) {
@@ -344,33 +348,33 @@ const resetPasswordWithOTP = async (req, res) => {
 
 const searchDoctors = async (req, res) => {
   try {
-    const { keyword = '', specialization = '', sortBy = 'user.name', sortOrder = 'asc', page = 1, limit = 6 } = req.query;
+    const {
+      keyword = '',
+      specialization = '',
+      sortBy = 'user.name',
+      sortOrder = 'asc',
+      page = 1,
+      limit = 6
+    } = req.query;
+
     const pageNum = parseInt(page, 10);
     const limitNum = parseInt(limit, 10);
     const regex = new RegExp(keyword, 'i');
 
-    const matchConditions = [];
-
-    // Always include only active doctors
-    matchConditions.push({
-      status: 'active'
-    });
-
+    const matchConditions = [{ status: 'active' }];
 
     if (keyword) {
       matchConditions.push({
-        $or: [{ specialization: regex },
-        { 'hospital.name': regex },
-        { 'user.name': regex }]
-
-
-      })
+        $or: [
+          { specialization: regex },
+          { 'hospital.name': regex },
+          { 'user.name': regex }
+        ]
+      });
     }
 
     if (specialization) {
-      matchConditions.push({
-        specialization: specialization
-      })
+      matchConditions.push({ specialization });
     }
 
     const skip = (pageNum - 1) * limitNum;
@@ -384,10 +388,7 @@ const searchDoctors = async (req, res) => {
           as: 'user'
         }
       },
-      {
-        $unwind: '$user'
-      },
-
+      { $unwind: '$user' },
       {
         $lookup: {
           from: 'hospitals',
@@ -397,28 +398,27 @@ const searchDoctors = async (req, res) => {
         }
       },
       { $unwind: '$hospital' },
-      ...(matchConditions.length > 0 ? [{
+      {
         $match: { $and: matchConditions }
-      }] : []),
+      },
       {
         $project: {
           specialization: 1,
           experience: 1,
           fee: 1,
           bio: 1,
-          fee: 1,
+          nextAvailability: 1,
           'user.profilePicture': 1,
           'user.name': 1,
           'hospital.name': 1,
           'hospital.location': 1,
           'hospital.phoneNumber': 1,
           'hospital.googleMapsLink': 1
-
         }
       },
       {
         $sort: {
-          [sortBy]: sortOrder == 'desc' ? -1 : 1
+          [sortBy]: sortOrder === 'desc' ? -1 : 1
         }
       },
       { $skip: skip },
@@ -434,38 +434,33 @@ const searchDoctors = async (req, res) => {
           as: 'user'
         }
       },
-
       { $unwind: '$user' },
-      ...(matchConditions.length > 0 ? [{
-        $match: {
-          $and: matchConditions
-        }
-      }] : []),
-
+      {
+        $match: { $and: matchConditions }
+      },
       { $count: 'total' }
     ];
-    const [doctors, countResult] = await Promise.all([Doctor.aggregate(pipeline), Doctor.aggregate(countPipeline)]);
 
-
+    const [doctors, countResult] = await Promise.all([
+      Doctor.aggregate(pipeline),
+      Doctor.aggregate(countPipeline)
+    ]);
 
     const totalDoctors = countResult.length > 0 ? countResult[0].total : 0;
+
     res.status(200).json({
       data: doctors,
       count: totalDoctors,
-      limit,
-      page,
-      totalPages: Math.ceil(totalDoctors / limit)
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(totalDoctors / limitNum)
     });
 
-
-  }
-  catch (err) {
+  } catch (err) {
     console.error('Unable to fetch doctor data:', err);
-    res.status(500).json({ message: 'Unable to fetch doctor data: from server' });
+    res.status(500).json({ message: 'Unable to fetch doctor data from server' });
   }
-
-
-}
+};
 
 
 
@@ -475,17 +470,24 @@ const editProfile = async (req, res) => {
     const role = req.user.role;
     const data = req.body;
 
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
 
-    // Step 1: Prepare user fields (shared)
     const userFields = {
       name: data.name,
     };
 
-    if (req.file) {
-      userFields.profilePicture = `/uploads/profile/${req.file.filename}`;
+    if (data.profilePicture) {
+      if (user.profilePicture && user.profilePicture !== data.profilePicture) {
+
+        console.log("profile key" + user.profilePicture);
+        console.log("key from frontend" + data.profilePicture)
+
+        await deleteImageFromS3(user.profilePicture);
+      }
+      userFields.profilePicture = data.profilePicture;
     }
 
-    // Add user-only fields if role is user
     if (role === 'user') {
       userFields.gender = data.gender;
       userFields.dob = data.dob;
@@ -493,10 +495,25 @@ const editProfile = async (req, res) => {
       userFields.address = data.address;
     }
 
-    // Update User collection
+    // ✅ Password change handling
+    if (data.changePassword) {
+      if (!data.oldPassword || !data.newPassword) {
+        return res.status(400).json({ message: 'Old and new passwords are required' });
+      }
+
+      const isMatch = await user.matchPassword(data.oldPassword);
+      if (!isMatch) {
+        return res.status(401).json({ message: 'Incorrect current password' });
+      }
+
+      user.password = data.newPassword;
+      user._passwordIsHashed = false; // Optional: to avoid rehashing if already hashed
+      await user.save();
+    }
+
     await User.findByIdAndUpdate(userId, userFields);
 
-    // Step 2: If doctor, update Doctor model
+    let updatedDoctor = null;
     if (role === 'doctor') {
       const doctorFields = {
         specialization: data.specialization,
@@ -505,20 +522,13 @@ const editProfile = async (req, res) => {
         bio: data.bio,
       };
 
-      await Doctor.findOneAndUpdate({ userId }, doctorFields);
+      updatedDoctor = await Doctor.findOneAndUpdate({ userId }, doctorFields, {
+        new: true,
+      }).populate('hospital');
     }
 
-    // Step 3: Refetch updated data
     const updatedUser = await User.findById(userId).lean();
-    let updatedDoctor = null;
 
-    if (role === 'doctor') {
-      updatedDoctor = await Doctor.findOne({ userId })
-        .populate('hospital')
-        .lean();
-    }
-
-    // Step 4: Build consistent response object
     const responseData = {
       id: updatedUser._id,
       name: updatedUser.name,
@@ -528,7 +538,7 @@ const editProfile = async (req, res) => {
       profilePicture: updatedUser.profilePicture || '',
       status: {
         user: updatedUser.status,
-        ...(role === 'doctor' && { doctor: updatedDoctor.status }),
+        ...(role === 'doctor' && { doctor: updatedDoctor?.status }),
       },
     };
 
@@ -541,7 +551,7 @@ const editProfile = async (req, res) => {
       };
     }
 
-    if (role === 'doctor') {
+    if (role === 'doctor' && updatedDoctor) {
       responseData.specialization = updatedDoctor.specialization;
       responseData.experience = updatedDoctor.experience;
       responseData.fee = updatedDoctor.fee;
@@ -555,38 +565,56 @@ const editProfile = async (req, res) => {
         googleMapsLink: updatedDoctor.hospital?.googleMapsLink || '',
       };
     }
-    console.log(responseData)
+
     return res.status(200).json({
       message: 'Profile updated successfully',
       user: responseData,
     });
   } catch (err) {
-    console.error('Error updating profile data:', err);
-    return res.status(500).json({ message: 'Error updating profile data' });
+    console.error('Error updating profile:', err);
+    res.status(500).json({ message: 'Server error during profile update' });
   }
 };
 
 
 
 
-const allHospitals = async (req, res) => {
-  try {
-    const hospitals = await Hospital.find();
-    if (!hospitals || hospitals.length == 0) {
-      return res.status(404).json({ mesage: "Hospitals not found" })
-    }
-    res.status(200).json({ message: "hospitals found", hospitals })
 
+const searchHospitals = async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    const limit = Math.min(parseInt(req.query.limit || 10, 10), 50);
+
+    // if no query, return a few popular/recent hospitals
+    if (!q) {
+      const docs = await Hospital.find({})
+        .sort({ updatedAt: -1 })
+        .limit(limit)
+        .select('_id name location')
+        .lean();
+      return res.json({ hospitals: docs });
+    }
+
+    // simple case-insensitive prefix/contains match on name + location
+    const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+
+    const docs = await Hospital.find({
+      $or: [{ name: regex }, { location: regex }]
+    })
+      .limit(limit)
+      .select('_id name location')
+      .lean();
+
+    res.json({ hospitals: docs });
+  } catch (err) {
+    console.error('Hospital search error:', err);
+    res.status(500).json({ message: 'Failed to fetch hospitals' });
   }
-  catch (err) {
-    console.error('Error fetching hospitals', err);
-    res.status(500).json({ message: 'Error fetching hospitals ' });
-  }
-}
+};
 
 const allSpecializations = async (req, res) => {
   try {
-    const specializations = await Doctor.distinct('specialization', { status: 'pending' });
+    const specializations = await Doctor.distinct('specialization', { status: 'active' });
     res.status(200).json({ specializations });
   }
   catch (err) {
@@ -595,56 +623,59 @@ const allSpecializations = async (req, res) => {
   }
 }
 
-
-const finddoctorsByHospital = async (req, res) => {
+{/*
+const findDoctorsByHospital = async (req, res) => {
   try {
+    const { id } = req.params;
+    const search = req.query.search?.trim() || '';
+    const specialization = req.query.specialization?.trim() || '';
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
+    const limit = parseInt(req.query.limit) || 12;
     const skip = (page - 1) * limit;
-    const hospitals = await Hospital.aggregate(
-      [
-        {
-          $match: { status: 'active' }
-        },
-        {
-          $lookup: {
-            from: 'doctors',
-            localField: '_id',
-            foreignField: 'hospital',
-            as: 'doctors'
-          }
-        }, {
-          $addFields: {
-            doctorCount: { $size: '$doctors' }
-          }
-        },
-        {
-          $project: {
-            name: 1,
-            imageUrl: 1,
-            location: 1,
-            doctorCount: 1
-          }
-        },
-        { $skip: skip },
-        { $limit: limit }
-      ]
-    )
 
-    const totalHospitals = await Hospital.countDocuments({ status: 'pending' });
+    // Validate hospital exists
+    const hospitalExists = await Hospital.exists({ _id: id, status: 'active' });
+    if (!hospitalExists) {
+      return res.status(404).json({ message: 'Hospital not found or inactive' });
+    }
+
+    const query = {
+      hospital: new mongoose.Types.ObjectId(id),
+      status: 'active'
+    };
+
+    // Optional filters
+    if (search) {
+      query.name = { $regex: search, $options: 'i' }; // case-insensitive
+    }
+    if (specialization) {
+      query.specialty = specialization;
+    }
+
+    const doctors = await Doctor.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const totalDoctors = await Doctor.countDocuments(query);
 
     res.status(200).json({
-      total: totalHospitals,
+      total: totalDoctors,
       page,
-      totalPages: Math.ceil(totalHospitals / limit),
-      data: hospitals
+      totalPages: Math.ceil(totalDoctors / limit),
+      doctors,
+      hasMore: page * limit < totalDoctors
     });
-  }
-  catch (err) {
+  } catch (err) {
     console.error('Error fetching doctors by hospital', err);
-    res.status(500).json({ message: 'Error fetching doctors by hospital ' });
+    res.status(500).json({ message: 'Error fetching doctors by hospital' });
   }
-}
+};
+ */}
+
+
+
 
 const getDoctorData = async (req, res) => {
   try {
@@ -668,39 +699,191 @@ const getDoctorData = async (req, res) => {
   }
 
 }
-
 const appointmentHistory = async (req, res) => {
-
-  const userId = req.user._id;
-  const status = req.query.status;
-  if (!['Confirmed', 'Completed', 'Cancelled'].includes(status)) {
-    return res.status(400).json({ error: 'Invalid status value' });
-  }
-
-  const appointments = await Appointment.find({ userId: userId, status: status }).populate({
-    path: 'doctorId',
-    select: 'name specialization fee hospital userId',
-    populate: [
-      {
-        path: 'hospital',
-        select: 'name'
-      },
-      {
-        path: 'userId',
-        select: 'name email' // get the actual user's info behind the doctor
-      }
-    ]
-  }).populate('userId', 'name').sort({ createdAt: -1 });
-  console.log(appointments)
-  res.json(appointments);
-
   try {
-  }
-  catch (err) {
+    const userIdObj = new mongoose.Types.ObjectId(req.user._id);
+    const status = String(req.query.status || '');
+
+    // pagination
+    const pageRaw = Number(req.query.page);
+    const limitRaw = Number(req.query.limit);
+    const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(50, limitRaw) : 10;
+    const skip = (page - 1) * limit;
+
+    if (!['Confirmed', 'Completed', 'Cancelled'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status value' });
+    }
+
+    const matchStage = { userId: userIdObj, status };
+
+    const [result] = await Appointment.aggregate([
+      { $match: matchStage },
+      {
+        $facet: {
+          total: [{ $count: 'count' }],
+          data: [
+            { $sort: { createdAt: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+
+            // PATIENT (the booking user)
+            { $lookup: { from: 'users', localField: 'userId', foreignField: '_id', as: 'patientUser' } },
+            { $unwind: { path: '$patientUser', preserveNullAndEmptyArrays: true } },
+
+            // DOCTOR
+            { $lookup: { from: 'doctors', localField: 'doctorId', foreignField: '_id', as: 'doctor' } },
+            { $unwind: '$doctor' },
+
+            // DOCTOR'S USER
+            { $lookup: { from: 'users', localField: 'doctor.userId', foreignField: '_id', as: 'doctorUser' } },
+            { $unwind: '$doctorUser' },
+
+            // HOSPITAL (optional)
+            { $lookup: { from: 'hospitals', localField: 'doctor.hospital', foreignField: '_id', as: 'hospital' } },
+            { $unwind: { path: '$hospital', preserveNullAndEmptyArrays: true } },
+
+            // REVIEW (by appointmentId)
+            {
+              $lookup: {
+                from: 'reviews',
+                let: { apptId: '$_id', me: userIdObj },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $and: [
+                          { $eq: ['$appointmentId', '$$apptId'] },
+                          { $eq: ['$patientId', '$$me'] }           // <- only this user's review
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    $project: {
+                      _id: 1,
+                      rating_overall: 1,
+                      text: 1,
+                      createdAt: 1,
+                      doctor_reply: 1,
+                      patientId: 1
+                    }
+                  },
+                  { $limit: 1 }                                    // enforce one review per appt
+                ],
+                as: 'review'
+              }
+            },
+
+            // normalized single object + existence flag (no unwind/null traps)
+            {
+              $addFields: {
+                reviewExists: { $gt: [{ $size: '$review' }, 0] },
+                review: { $cond: [{ $gt: [{ $size: '$review' }, 0] }, { $first: '$review' }, null] }
+              }
+            },
+
+            // flags (now safe to read from `review`)
+            {
+              $set: {
+                canEdit: {
+                  $and: [
+                    '$reviewExists',
+                    { $eq: ['$review.patientId', userIdObj] }, // redundant but explicit
+                    {
+                      $lte: [
+                        {
+                          $dateDiff: {
+                            startDate: '$review.createdAt',
+                            endDate: '$$NOW',
+                            unit: 'hour'
+                          }
+                        },
+                        24
+                      ]
+                    }
+                  ]
+                },
+                canEditUntil: {
+                  $cond: [
+                    '$reviewExists',
+                    { $dateAdd: { startDate: '$review.createdAt', unit: 'hour', amount: 24 } },
+                    null
+                  ]
+                }
+              }
+            },
+
+            // FINAL SHAPE (coerce review {} -> null and expose only needed fields)
+            {
+              $project: {
+                _id: 1, date: 1, slot: 1, fee: 1, status: 1, createdAt: 1,
+
+                patient: {
+                  _id: '$patientUser._id',
+                  name: '$patientUser.name',
+                  email: '$patientUser.email',
+                  profilePicture: '$patientUser.profilePicture'
+                },
+
+                doctor: {
+                  _id: '$doctor._id',
+                  specialization: '$doctor.specialization',
+                  fee: '$doctor.fee',
+                  user: {
+                    _id: '$doctorUser._id',
+                    name: '$doctorUser.name',
+                    email: '$doctorUser.email',
+                    profilePicture: '$doctorUser.profilePicture'
+                  }
+                },
+
+                hospital: { _id: '$hospital._id', name: '$hospital.name' },
+
+                reviewExists: 1,
+                canEdit: 1,
+                canEditUntil: 1,
+
+                review: {
+                  $cond: [
+                    { $ne: ['$review._id', null] },
+                    {
+                      _id: '$review._id',
+                      rating_overall: '$review.rating_overall',
+                      text: '$review.text',
+                      createdAt: '$review.createdAt',
+                      doctor_reply: '$review.doctor_reply'
+                    },
+                    null
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]);
+
+    const total = result?.total?.[0]?.count || 0;
+    const items = result?.data || [];
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    res.json({
+      items,
+      page,
+      limit,
+      total,
+      totalPages,
+      hasPrev: page > 1,
+      hasNext: page < totalPages
+    });
+  } catch (err) {
     console.error('Error fetching Appointment History', err);
     res.status(500).json({ message: 'Error fetching Appointment History' });
   }
-}
+};
+
+
 
 
 const createAdmin = async (req, res) => {
@@ -735,11 +918,68 @@ const createAdmin = async (req, res) => {
 
 
 
+function escapeRegExp(str = '') {
+  // escape user input so regex is safe
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const getHospitals = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
+    const searchRaw = (req.query.search || '').trim();
+
+    const query = { status: 'active' };
+    if (searchRaw) {
+      const rx = new RegExp(escapeRegExp(searchRaw), 'i');
+      query.$or = [{ name: rx }, { location: rx }];
+    }
+
+    const [items, total] = await Promise.all([
+      Hospital.find(query, { name: 1, location: 1, images: 1, createdAt: 1 })
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Hospital.countDocuments(query),
+    ]);
+
+    // For 3 or 10 items, this simple per-hospital count is fine.
+    const data = await Promise.all(
+      items.map(async (h) => {
+        const doctorCount = await Doctor.countDocuments({ hospital: h._id, status: 'active' });
+        const firstImageKey = Array.isArray(h.images) && h.images.length ? h.images[0] : '';
+        return {
+          _id: h._id,
+          name: h.name,
+          location: h.location || '',
+          imageUrl: makePublicUrlFromKey(firstImageKey),
+          doctorCount,
+        };
+      })
+    );
+
+    res.json({
+      data,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    console.error('getHospitals error:', err);
+    res.status(500).json({ error: 'Failed to fetch hospitals' });
+  }
+}
+
+
 
 
 
 module.exports = {
-  registerUser, signin, searchDoctors, editProfile, allHospitals, allSpecializations,
-  finddoctorsByHospital, getDoctorData, appointmentHistory, createAdmin, verifyOTP, resendOTP,
-  resetPasswordWithOTP, sendPasswordResetOTP
+  registerUser, signin, searchDoctors, editProfile, searchHospitals, allSpecializations,
+  getDoctorData, appointmentHistory, createAdmin, verifyOTP, resendOTP,
+  resetPasswordWithOTP, sendPasswordResetOTP, getHospitals
 }

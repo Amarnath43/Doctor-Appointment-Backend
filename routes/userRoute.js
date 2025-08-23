@@ -1,28 +1,26 @@
 const express=require('express');
 const router=express.Router();
-const {registerUser,signin, searchDoctors,editProfile, allHospitals, allSpecializations, finddoctorsByHospital, appointmentHistory, createAdmin, resendOTP, verifyOTP, resetPasswordWithOTP, sendPasswordResetOTP}=require('../controllers/userController')
+const {registerUser,signin, searchDoctors,editProfile, getHospitals,searchHospitals, allSpecializations,  appointmentHistory, createAdmin, resendOTP, verifyOTP, resetPasswordWithOTP, sendPasswordResetOTP}=require('../controllers/userController')
 const {myAppointments}=require('../controllers/appointmentController')
 const authMiddleware=require('../middleware/authMiddleware');
 const roleMiddleware=require('../middleware/roleMiddleware');
 const validateRequest=require('../middleware/validateReqMiddleware');
 const  { registerUserSchema, loginUserSchema,editUserProfileSchema } =require('../validations/userAuthValidation');
-const createUploader=require('../middleware/multerMiddleware')
-const profileUploader = createUploader('profile');
 const verifyAdminSecret=require('../middleware/verifyAdminSecret')
 
 router.post('/register',validateRequest(registerUserSchema), registerUser);
 router.post('/signin', validateRequest(loginUserSchema),signin);
-router.put('/edit-profile',authMiddleware,roleMiddleware(['user']),profileUploader.single('profilePicture'), validateRequest(editUserProfileSchema),editProfile);
+router.put('/edit-profile',authMiddleware,roleMiddleware(['user']), validateRequest(editUserProfileSchema),editProfile);
 
 router.get('/myappointments',authMiddleware, roleMiddleware(['user']), myAppointments);
 
 router.get('/search-doctors', searchDoctors );
 
-router.get('/allhospitals',allHospitals);
+router.get('/hospitals-register',searchHospitals);
 
 router.get('/all-specializations', allSpecializations);
 
-router.get('/hospitals',finddoctorsByHospital);
+router.get('/hospitals',getHospitals);
 
 router.get('/appointments',authMiddleware, roleMiddleware(['user']),appointmentHistory)
 

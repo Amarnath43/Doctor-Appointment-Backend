@@ -2,73 +2,113 @@ const Appointment = require('../models/appointmentModel');
 const Doctor = require('../models/doctorModel');
 const mongoose = require('mongoose');
 const getNextAvailableSlot = require('../utils/getNextAvailableSlot');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
+dayjs.extend(utc);
+dayjs.extend(timezone);
+const mergeSlotToDateArray = require('../utils/mergeSlotToDateArray')
+const { sendAppointmentBookedEmail } = require('../emails/appointments'); // <- from earlier
+
+
 
 const bookAppointment = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
-
   try {
     const { doctorId, date, slot } = req.body;
     const userId = req.user._id;
-    const dateStr = new Date(date).toISOString().split('T')[0];
 
-    // 1) Remove the slot
-    const pullRes = await Doctor.updateOne(
-      { _id: doctorId, 'availability.date': dateStr },
-      { $pull: { 'availability.$.slots': slot } },
-      { session }
-    );
-
-    if (pullRes.modifiedCount === 0) {
-      throw { status: 409, message: 'Slot already booked' };
+    const doctor = await Doctor.findById(doctorId).session(session);
+    if (!doctor) {
+      await session.abortTransaction(); return res.status(404).json({ message: 'Doctor not found' });
     }
 
-    // 2) Recalculate nextAvailability
-    const doctor = await Doctor.findById(doctorId).session(session);
-    doctor.availability = doctor.availability.filter(entry => entry.slots.length > 0);
-    doctor.availability.sort((a, b) => new Date(a.date) - new Date(b.date));
+    // Build an **IST instant**, then convert to **UTC** (we store/compare UTC)
+    const istDateTime = dayjs.tz(`${date} ${slot}`, 'YYYY-MM-DD HH:mm', 'Asia/Kolkata');
+    const utcInstant = istDateTime.utc(); // dayjs (UTC)
+    const utcDate = utcInstant.toDate();  // Date
+
+    // compare UTC↔UTC (server agnostic)
+    if (!utcInstant.isAfter(dayjs.utc())) {
+      await session.abortTransaction(); return res.status(400).json({ message: 'Slot is in the past' });
+    }
+
+    // check availability by calendar day in IST (your UI supplies IST)
+    const entry = doctor.availability.find(d =>
+      dayjs.utc(d.date).tz('Asia/Kolkata').format('YYYY-MM-DD') === date
+    );
+    if (!entry || !entry.slots.includes(slot)) {
+      await session.abortTransaction(); return res.status(409).json({ message: 'Slot not available' });
+    }
+
+    // remove booked slot
+    entry.slots = entry.slots.filter(s => s !== slot);
+    doctor.availability = doctor.availability.filter(e => e.slots.length > 0);
     doctor.nextAvailability = getNextAvailableSlot(doctor.availability);
     await doctor.save({ session });
 
-    // 3) Create the appointment
-    const appointment = new Appointment({
+
+    const [appointment] = await Appointment.create([{
       userId,
       doctorId,
-      date: new Date(date),
-      slot,
-      status: 'Confirmed'
-    });
-    await appointment.save({ session });
+      date: utcDate, // full UTC datetime
+      slot,          // keep for convenience
+      status: 'Confirmed',
+    }], { session });
 
-    // 4) Commit the transaction
     await session.commitTransaction();
     session.endSession();
 
-    const fullAppt = await Appointment
-      .findById(appointment._id)
+    // populate for response & emails
+    const fullAppt = await Appointment.findById(appointment._id)
       .populate({
         path: 'doctorId',
-        select: 'userId specialization fee profilePicture hospitalId',
+        select: 'userId specialization fee profilePicture hospital',
         populate: [
-          { path: 'userId', select: 'name' },
-          { path: 'hospital', select: 'name location googleMapsLink' }
-        ]
-      });
+          { path: 'userId', select: 'name email' },
+          { path: 'hospital', select: 'name location googleMapsLink' },
+        ],
+      })
+      .populate({ path: 'userId', select: 'name email' });
+
+    const slotISO = dayjs(utcDate).toISOString();
+    const patientEmail = fullAppt.userId?.email;
+    const patientName = fullAppt.userId?.name || 'there';
+    const doctorName = fullAppt.doctorId?.userId?.name || 'your doctor';
+    const hospitalName = fullAppt.doctorId?.hospital?.name || 'Hospital';
+
+    if (patientEmail) {
+      sendAppointmentBookedEmail(patientEmail, {
+        patientName,
+        doctorName,
+        hospitalName,
+        slotISO,            // UTC ISO
+        tz: 'Asia/Kolkata',
+        appointmentId: String(fullAppt._id),
+      }).catch(console.error);
+    }
+
+    const docEmail = fullAppt.doctorId?.userId?.email;
+    if (docEmail) {
+      sendAppointmentBookedEmail(docEmail, {
+        patientName,
+        doctorName,
+        hospitalName,
+        slotISO,
+        tz: 'Asia/Kolkata',
+        appointmentId: String(fullAppt._id),
+      }).catch(console.error);
+    }
 
     return res.status(201).json({ message: 'Booked!', fullAppt });
-
   } catch (err) {
-    if (session.inTransaction()) {
-      await session.abortTransaction();
+    await session.abortTransaction(); session.endSession(); 
+    if (err.code === 11000) {
+      return res.status(409).json({ message: 'That slot was just taken. Please pick another.' });
     }
-    session.endSession();
-
-    if (err.status === 409) {
-      return res.status(409).json({ message: err.message });
-    }
-
-    console.error('Book appointment error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('Booking error:', err);
+    return res.status(500).json({ message: 'Booking failed' });
   }
 };
 
@@ -84,67 +124,98 @@ const cancelAppointment = async (req, res) => {
 
     const appointment = await Appointment.findById(appointmentId).session(session);
     if (!appointment) {
-      await session.abortTransaction();
-      return res.status(404).json({ message: "Appointment not found" });
+      await session.abortTransaction(); return res.status(404).json({ message: 'Appointment not found' });
     }
 
-    // Authorization
-    if (role === 'user' && appointment.userId.toString() !== userId.toString()) {
-      await session.abortTransaction();
-      return res.status(403).json({ message: "You cannot cancel others' appointments" });
+    if (appointment.status === 'Cancelled') {
+      await session.abortTransaction(); return res.status(409).json({ message: 'Appointment already cancelled' });
     }
 
+    // auth
+    if (role === 'user' && String(appointment.userId) !== String(userId)) {
+      await session.abortTransaction(); return res.status(403).json({ message: "You can't cancel others' appointments" });
+    }
     if (role === 'doctor') {
-      const doctor = await Doctor.findOne({ userId }).session(session);
-      if (!doctor || appointment.doctorId.toString() !== doctor._id.toString()) {
-        await session.abortTransaction();
-        return res.status(403).json({ message: "You cannot cancel others' appointments" });
+      const doctorForUser = await Doctor.findOne({ userId }).session(session);
+      if (!doctorForUser || String(appointment.doctorId) !== String(doctorForUser._id)) {
+        await session.abortTransaction(); return res.status(403).json({ message: "You can't cancel others' appointments" });
       }
     }
 
-    // Mark appointment as cancelled
+    // cancel
     appointment.status = 'Cancelled';
     await appointment.save({ session });
 
-    // Restore the slot
-    const dateStr = appointment.date.toISOString().split('T')[0];
-    const dateOnly = new Date(dateStr + 'T00:00:00.000Z');
-
-    await Doctor.updateOne(
-      { _id: appointment.doctorId, 'availability.date': dateOnly },
-      {
-        $push: {
-          'availability.$.slots': {
-            $each: [appointment.slot],
-            $sort: 1
-          }
-        }
-      },
-      { session }
-    );
-
-    // 🔁 Recalculate nextAvailability
+    // restore slot (future slots -> availability, past -> pastAvailability)
     const doctor = await Doctor.findById(appointment.doctorId).session(session);
-    doctor.availability = doctor.availability.filter(entry => entry.slots.length > 0);
-    doctor.availability.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    // Use UTC instant stored, transform to IST calendar for the slot label date
+    const instUTC = dayjs.utc(appointment.date);
+    const dateStrIST = instUTC.tz('Asia/Kolkata').format('YYYY-MM-DD');
+    const slotInstantIST = dayjs.tz(`${dateStrIST} ${appointment.slot}`, 'YYYY-MM-DD HH:mm', 'Asia/Kolkata');
+
+    if (slotInstantIST.utc().isAfter(dayjs.utc())) {
+      mergeSlotToDateArray(doctor.availability, dateStrIST, appointment.slot);
+    } else {
+      mergeSlotToDateArray(doctor.pastAvailability, dateStrIST, appointment.slot);
+    }
+
+    doctor.availability = doctor.availability.filter(e => e.slots.length > 0);
+    doctor.availability.sort((a, b) => a.date - b.date);
     doctor.nextAvailability = getNextAvailableSlot(doctor.availability);
     await doctor.save({ session });
 
-    // Finalize
     await session.commitTransaction();
     session.endSession();
 
-    res.status(200).json({
-      message: "Appointment cancelled successfully; slot restored.",
-      appointment
+    // emails after commit
+    const populated = await Appointment.findById(appointment._id)
+      .populate({ path: 'userId', select: 'name email' })
+      .populate({
+        path: 'doctorId',
+        select: 'userId hospital',
+        populate: [
+          { path: 'userId', select: 'name email' },
+          { path: 'hospital', select: 'name location googleMapsLink' },
+        ],
+      });
+
+    const patientEmail = populated.userId?.email;
+    const patientName = populated.userId?.name || 'there';
+    const doctorEmail = populated.doctorId?.userId?.email;
+    const doctorName = populated.doctorId?.userId?.name || 'Doctor';
+    const hospitalName = populated.doctorId?.hospital?.name || 'Hospital';
+    const slotISO = dayjs(appointment.date).toISOString();
+
+    if (patientEmail) {
+      sendAppointmentCancelledEmail(patientEmail, {
+        patientName,
+        doctorName,
+        slotISO,
+        tz: 'Asia/Kolkata',
+      }).catch(console.error);
+    }
+    if (doctorEmail) {
+      sendAppointmentCancelledEmail(doctorEmail, {
+        patientName,
+        doctorName,
+        slotISO,
+        tz: 'Asia/Kolkata',
+      }).catch(console.error);
+    }
+
+    return res.status(200).json({
+      message: 'Appointment cancelled; slot restored/archived.',
+      appointment: populated,
     });
   } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    console.error("Error cancelling appointment:", err);
-    res.status(500).json({ message: "Server error" });
+    try { await session.abortTransaction(); session.endSession(); } catch (_) { }
+    console.error('Error cancelling appointment:', err);
+    return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
 
 const myAppointments = async (req, res) => {
   try {
@@ -189,22 +260,22 @@ const getDoctorAppointments = async (req, res) => {
     };
 
     if (startDate || endDate) {
-  matchStage.date = {};
-  if (startDate) matchStage.date.$gte = new Date(startDate);
-  if (endDate) {
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
-    matchStage.date.$lte = end;
-  }
-}
+      matchStage.date = {};
+      if (startDate) matchStage.date.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchStage.date.$lte = end;
+      }
+    }
 
 
     if (status) {
-  const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
-  if (statuses.length > 0) {
-    matchStage.status = { $in: statuses };
-  }
-}
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length > 0) {
+        matchStage.status = { $in: statuses };
+      }
+    }
     const searchClauses = [];
     if (search) {
       const regex = new RegExp(search, 'i');
@@ -287,76 +358,150 @@ const getAllAppointments = async (req, res) => {
 
 
 const rescheduleAppointment = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const appointmentId = req.params.id;
     const { newDate, newSlot } = req.body;
     const userId = req.user._id;
 
-    const appointment = await Appointment.findById(appointmentId);
+    const appointment = await Appointment.findById(appointmentId).session(session);
     if (!appointment) {
-      return res.status(404).json({ message: "Appointment not found" });
+      await session.abortTransaction(); return res.status(404).json({ message: 'Appointment not found' });
     }
 
-    if (req.user.role === 'user') {
-      if (!(appointment.userId.toString() === userId.toString())) {
-        return res.status(403).json({ message: "you cannot reschedule someone else appointment" });
-      }
-
+    // auth
+    if (req.user.role === 'user' && String(appointment.userId) !== String(userId)) {
+      await session.abortTransaction(); return res.status(403).json({ message: 'You cannot reschedule someone else’s appointment' });
     }
-
     if (req.user.role === 'doctor') {
-      const doctor = await Doctor.findOne({ userId: userId });
-      if (!doctor || appointment.doctorId.toString() !== doctor._id.toString()) {
-        return res.status(403).json({ message: "you cannot reschedule some other doctor appointment" });
+      const doc = await Doctor.findOne({ userId }).session(session);
+      if (!doc || String(appointment.doctorId) !== String(doc._id)) {
+        await session.abortTransaction(); return res.status(403).json({ message: 'You cannot reschedule another doctor’s appointment' });
       }
     }
 
-    const doctor = await Doctor.findById(appointment.doctorId);
+    const doctor = await Doctor.findById(appointment.doctorId).session(session);
 
-    const availableDate = doctor.availability.find(a => a.date.toISOString().split('T')[0] === new Date(newDate).toISOString().split('T')[0])
+    // new IST -> UTC
+    const newIST = dayjs.tz(`${newDate} ${newSlot}`, 'YYYY-MM-DD HH:mm', 'Asia/Kolkata');
+    const newUTC = newIST.utc();
 
-    if (!availableDate) {
-      return res.status(404).json({ message: "Selected Date is not available for booking" });
+    if (!newUTC.isAfter(dayjs.utc())) {
+      await session.abortTransaction(); return res.status(400).json({ message: 'Slot is in the past' });
     }
-    if (!availableDate.slots.includes(newSlot)) {
-      return res.status(400).json({ message: "Selected slot is already booked" });
+
+    // must exist in availability (by IST day and slot)
+    const availOnDay = doctor.availability.find(
+      d => dayjs.utc(d.date).tz('Asia/Kolkata').format('YYYY-MM-DD') === newDate
+    );
+    if (!availOnDay || !availOnDay.slots.includes(newSlot)) {
+      await session.abortTransaction(); return res.status(400).json({ message: 'Selected slot is not available' });
     }
 
-    const existingAvailability = await Appointment.findOne({
+    // check not already taken
+    const slotTaken = await Appointment.findOne({
       doctorId: doctor._id,
-      date: new Date(newDate),
+      date: newUTC.toDate(),
       slot: newSlot,
-      status: 'confirmed'
-    });
-
-    if (existingAvailability) {
-      return res.status(400).json({ message: "Slot already booked by someone else" });
+      status: 'Confirmed',
+    }).session(session);
+    if (slotTaken) {
+      await session.abortTransaction(); return res.status(400).json({ message: 'Slot already booked by someone else' });
     }
 
-    const newAppointment = new Appointment({
+    // remove new slot from availability
+    availOnDay.slots = availOnDay.slots.filter(s => s !== newSlot);
+    doctor.availability = doctor.availability.filter(e => e.slots.length > 0);
+
+    // cancel old appointment and restore its slot
+    const oldUTC = dayjs.utc(appointment.date);
+    const oldISTDateStr = oldUTC.tz('Asia/Kolkata').format('YYYY-MM-DD');
+    const oldSlot = appointment.slot;
+    appointment.status = 'Cancelled';
+    await appointment.save({ session });
+
+    // where to put old slot (future vs past based on UTC now)
+    const oldSlotInstantIST = dayjs.tz(`${oldISTDateStr} ${oldSlot}`, 'YYYY-MM-DD HH:mm', 'Asia/Kolkata');
+    if (oldSlotInstantIST.utc().isAfter(dayjs.utc())) {
+      mergeSlotToDateArray(doctor.availability, oldISTDateStr, oldSlot);
+    } else {
+      mergeSlotToDateArray(doctor.pastAvailability, oldISTDateStr, oldSlot);
+    }
+
+    doctor.availability = doctor.availability.filter(e => e.slots.length > 0);
+    doctor.availability.sort((a, b) => a.date - b.date);
+    doctor.nextAvailability = getNextAvailableSlot(doctor.availability);
+    await doctor.save({ session });
+
+    // make new appointment
+    const [newAppt] = await Appointment.create([{
       userId: appointment.userId,
       doctorId: appointment.doctorId,
-      date: new Date(newDate),
-      slot: newSlot
+      date: newUTC.toDate(),
+      slot: newSlot,
+      status: 'Confirmed',
+    }], { session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    // emails (after commit)
+    const populatedNew = await Appointment.findById(newAppt._id)
+      .populate({ path: 'userId', select: 'name email' })
+      .populate({
+        path: 'doctorId',
+        select: 'userId hospital',
+        populate: [
+          { path: 'userId', select: 'name email' },
+          { path: 'hospital', select: 'name location googleMapsLink' },
+        ],
+      });
+
+    const pEmail = populatedNew.userId?.email;
+    const pName = populatedNew.userId?.name || 'there';
+    const dEmail = populatedNew.doctorId?.userId?.email;
+    const dName = populatedNew.doctorId?.userId?.name || 'Doctor';
+
+    const oldISO = oldUTC.toISOString();
+    const newISO = dayjs(newAppt.date).toISOString();
+
+    if (pEmail) {
+      sendAppointmentRescheduledEmail(pEmail, {
+        patientName: pName,
+        doctorName: dName,
+        oldSlotISO: oldISO,
+        newSlotISO: newISO,
+        tz: 'Asia/Kolkata',
+        appointmentId: String(newAppt._id),
+      }).catch(console.error);
+    }
+    if (dEmail) {
+      sendAppointmentRescheduledEmail(dEmail, {
+        patientName: pName,
+        doctorName: dName,
+        oldSlotISO: oldISO,
+        newSlotISO: newISO,
+        tz: 'Asia/Kolkata',
+        appointmentId: String(newAppt._id),
+      }).catch(console.error);
+    }
+
+    res.status(200).json({
+      message: 'Appointment rescheduled successfully',
+      newAppointment: populatedNew,
     });
-    await newAppointment.save();
-
-    appointment.status = 'Cancelled'
-    await appointment.save();
-    res.status(200).json({ message: "Appointment rescheduled successfully", newAppointment });
-
+  } catch (err) {
+    try { await session.abortTransaction(); session.endSession(); } catch (_) { }
+    console.error('Error rescheduling appointment:', err);
+    res.status(500).json({ message: 'Server error while rescheduling appointment' });
   }
-  catch (err) {
-    console.error("Error rescheduling appointment:", err);
-    res.status(500).json({ message: "Server error while rescheduling appointment" });
-  }
+};
 
-}
-
-const getAppointmentDetails=async(req,res)=>{
-  try
-  {
-     const { id } = req.params;
+const getAppointmentDetails = async (req, res) => {
+  try {
+    const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'Invalid appointment ID' });
     }
@@ -367,13 +512,13 @@ const getAppointmentDetails=async(req,res)=>{
         path: 'doctorId',
         select: 'userId specialization hospitalId fee',
         populate: [
-          { path: 'userId',     select: 'name email profilePicture' },
+          { path: 'userId', select: 'name email profilePicture' },
           { path: 'hospital', select: 'name location phoneNumber googleMapsLink' }
         ]
       })
 
-      console.log(appointment)
-      
+    console.log(appointment)
+
 
     if (!appointment) {
       return res.status(404).json({ message: 'Appointment not found' });
@@ -388,4 +533,9 @@ const getAppointmentDetails=async(req,res)=>{
 }
 
 
-module.exports = { bookAppointment, cancelAppointment, myAppointments, getDoctorAppointments, getAllAppointments, rescheduleAppointment, getAppointmentDetails};
+
+
+module.exports = {
+  bookAppointment, cancelAppointment, myAppointments, getDoctorAppointments, getAllAppointments,
+  rescheduleAppointment, getAppointmentDetails
+};

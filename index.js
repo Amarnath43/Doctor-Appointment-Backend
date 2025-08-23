@@ -2,13 +2,16 @@ const express = require('express');
 const mongoose=require('mongoose');
 const dotenv = require('dotenv');
 const cors = require('cors');
-require('./cron/updateNextAvailability');
+require('./cron/cleanExpiredSlots');
 const path = require('path');
 const userRoutes=require('./routes/userRoute')
 const doctorRoutes=require('./routes/doctorRoute');
 const adminRoutes=require('./routes/adminRoute');
 const appointmentRoute=require('./routes/appointmentRoute');
-const hospitalRoute=require('./routes/hospitalRoute')
+const hospitalRoute=require('./routes/hospitalRoute');
+const uploadRoutes=require('./routes/uploadRoutes');
+const reviewRoute=require('./routes/reviewRoute');
+const adminReviewsRouter = require('./routes/admin.review.routes');
 const connectDB =require('./config/db')
 dotenv.config();
 
@@ -33,11 +36,13 @@ app.use('/api/doctor',doctorRoutes);
 app.use('/api/admin',adminRoutes);
 app.use('/api/appointments', appointmentRoute);
 app.use('/api/hospitals', hospitalRoute);
+app.use('/api',reviewRoute);
+app.use('/api/admin/reviews', adminReviewsRouter);
 app.use('/', (req,res,next)=>{
     console.log("user opened website");
     next();
 })
-
+app.use('/api/uploads',uploadRoutes)
 
 
 // serve everything in ./uploads under the /uploads URL path
