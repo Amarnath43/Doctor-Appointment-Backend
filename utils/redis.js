@@ -1,18 +1,19 @@
-// redisClient.js
+// utils/redis.js
+
 const { createClient } = require('redis');
 
-// Your connection URL
-const redisUrl = 'redis://:Amar234@#@127.0.0.1:6379';
+// Your connection URL with the password
+const redisUrl = 'redis://:Amar234@%23@127.0.0.1:6379';
 
-// Create the client
+// Create the client with the connection URL
 const redisClient = createClient({
   url: redisUrl
 });
 
-// Set up error handling
+// Set up a listener for connection errors
 redisClient.on('error', (err) => console.error('❌ Redis Client Error:', err));
 
-// Connect to Redis
+// Connect to Redis and log the status
 (async () => {
   try {
     await redisClient.connect();
@@ -22,5 +23,5 @@ redisClient.on('error', (err) => console.error('❌ Redis Client Error:', err));
   }
 })();
 
-// Export the connected client
+// Export the connected client for the rest of your app to use
 module.exports = redisClient;
