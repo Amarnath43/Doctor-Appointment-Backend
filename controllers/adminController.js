@@ -9,6 +9,12 @@ const fs = require('fs');
 const path = require('path');
 const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const {s3} = require('../utils/s3Client');
+const tz = require('dayjs/plugin/timezone');
+const utc=require('dayjs/plugin/utc'); 
+dayjs.extend(utc);
+dayjs.extend(tz);
+dayjs.tz.setDefault('Asia/Kolkata');
+
 
 
 const getPendingDoctors = async (req, res) => {
@@ -352,98 +358,115 @@ const deleteHospital = async (req, res) => {
 }
 
 
+
+
+// Helpers: convert an IST day string to UTC boundaries
+function istDayToUtcStart(dateStr) {
+  // "YYYY-MM-DD" interpreted as IST midnight → convert to UTC Date
+  return dayjs.tz(dateStr, 'Asia/Kolkata').startOf('day').utc().toDate();
+}
+function istDayToUtcEndExclusive(dateStr) {
+  // next IST midnight (exclusive upper bound) → UTC Date
+  return dayjs.tz(dateStr, 'Asia/Kolkata').add(1, 'day').startOf('day').utc().toDate();
+}
+
 const getAdminAppointments = async (req, res) => {
   try {
-    const APPTS_PER_PAGE = 10;
-    const {
-      startDate, endDate,
-      status, search,
-      page = 1, limit = APPTS_PER_PAGE
-    } = req.query;
-    console.log('→ status filter =', req.query.status);
-    const pageNum = Math.max(1, parseInt(page, 10));
-    const pageSize = Math.max(1, parseInt(limit, 10));
+    const DEFAULT_PER_PAGE = 10;
+    const MAX_PER_PAGE = 100;
 
-    // 1) Build the initial match filter
+    const {
+      startDate,              // "YYYY-MM-DD" (IST semantics)
+      endDate,                // "YYYY-MM-DD" (IST semantics)
+      status,                 // "Completed,Confirmed"
+      search,                 // free text (doctor or patient name)
+      page = 1,
+      limit = DEFAULT_PER_PAGE,
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const pageSize = Math.min(MAX_PER_PAGE, Math.max(1, parseInt(limit, 10) || DEFAULT_PER_PAGE));
+
+    // 1) Build match: IST day range → UTC [start, end)
     const matchFilter = {};
     if (startDate || endDate) {
       matchFilter.date = {};
-      if (startDate) matchFilter.date.$gte = new Date(startDate);
-      if (endDate) matchFilter.date.$lte = new Date(endDate);
+      if (startDate) matchFilter.date.$gte = istDayToUtcStart(startDate);
+      if (endDate)   matchFilter.date.$lt  = istDayToUtcEndExclusive(endDate);
     }
+
     if (status) {
-      matchFilter.status = { $in: status.split(',').map(s => s.trim()) };
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length) matchFilter.status = { $in: statuses };
     }
 
-
-    // 2) Build the post-lookup search match (on patient or doctor name)
-    const searchMatch = [];
-    if (search) {
-      const regex = new RegExp(search, 'i');
-      searchMatch.push(
+    // 2) Optional search over joined names (patient/doctor)
+    const orSearch = [];
+    if (search && search.trim()) {
+      const regex = new RegExp(search.trim(), 'i');
+      orSearch.push(
         { 'patient.name': { $regex: regex } },
         { 'doctorUser.name': { $regex: regex } }
       );
     }
 
-    // 3) Aggregation pipeline
+    // 3) Aggregation: filter → lookups → optional search → sort → facet (count & page)
     const pipeline = [
-      // initial date/status filter
       { $match: matchFilter },
 
-      // join patient user
+      // Join patient (users)
       {
         $lookup: {
           from: 'users',
           localField: 'userId',
           foreignField: '_id',
-          as: 'patient'
-        }
+          as: 'patient',
+          pipeline: [{ $project: { _id: 1, name: 1 } }],
+        },
       },
       { $unwind: '$patient' },
 
-      // join doctor document
+      // Join doctor document
       {
         $lookup: {
           from: 'doctors',
           localField: 'doctorId',
           foreignField: '_id',
-          as: 'doctor'
-        }
+          as: 'doctor',
+          pipeline: [{ $project: { _id: 1, userId: 1, specialization: 1, hospital: 1 } }],
+        },
       },
       { $unwind: '$doctor' },
 
-      // join doctor’s user
+      // Join doctor’s user
       {
         $lookup: {
           from: 'users',
           localField: 'doctor.userId',
           foreignField: '_id',
-          as: 'doctorUser'
-        }
+          as: 'doctorUser',
+          pipeline: [{ $project: { _id: 1, name: 1 } }],
+        },
       },
       { $unwind: '$doctorUser' },
 
-      // join hospital
+      // Join hospital
       {
         $lookup: {
           from: 'hospitals',
           localField: 'doctor.hospital',
           foreignField: '_id',
-          as: 'hospital'
-        }
+          as: 'hospital',
+          pipeline: [{ $project: { _id: 1, name: 1, location: 1 } }],
+        },
       },
       { $unwind: '$hospital' },
 
-      // apply search if needed
-      ...(searchMatch.length
-        ? [{ $match: { $or: searchMatch } }]
-        : []),
+      ...(orSearch.length ? [{ $match: { $or: orSearch } }] : []),
 
-      // sort newest first
-      { $sort: { date: -1, time: -1 } },
+      // Sort by real UTC datetime (newest first)
+      { $sort: { date: -1 } },
 
-      // pagination + projection
       {
         $facet: {
           metadata: [{ $count: 'total' }],
@@ -451,46 +474,67 @@ const getAdminAppointments = async (req, res) => {
             { $skip: (pageNum - 1) * pageSize },
             { $limit: pageSize },
             {
+              // Keep raw fields; we'll format date/time to IST after aggregation
               $project: {
-                _id: 0,
-                id: '$_id',
-                date: { $dateToString: { format: '%Y-%m-%d', date: '$date' } },
-                time: '$slot',
-                status: '$status',
-                modeOfPayment: '$paymentMode',
-                patientName: '$patient.name',
-                doctorName: '$doctorUser.name',
-                specialization: '$doctor.specialization',
-                hospitalName: '$hospital.name',
-                hospitalLocation: '$hospital.location'
-              }
-            }
-          ]
-        }
-      }
+                _id: 1,
+                date: 1,                // keep as Date
+                slot: 1,                // optional legacy field (can drop later)
+                status: 1,
+                duration: 1,
+                isPaid: 1,
+                paymentMode: 1,
+                'patient.name': 1,
+                'doctorUser.name': 1,
+                'doctor.specialization': 1,
+                'hospital.name': 1,
+                'hospital.location': 1,
+              },
+            },
+          ],
+        },
+      },
     ];
 
-    // 4) Run it
-    const [result] = await Appointment.aggregate(pipeline);
+    const [agg] = await Appointment.aggregate(pipeline, { allowDiskUse: true });
 
-    const appointments = result.data;
-    const totalCount = result.metadata[0]?.total || 0;
+    const raw = agg?.data ?? [];
+    const totalCount = agg?.metadata?.[0]?.total ?? 0;
 
-    // 5) Send back
+    // 4) Format for UI in IST (YYYY-MM-DD / HH:mm)
+    const data = raw.map(doc => {
+      const d = dayjs(doc.date).tz('Asia/Kolkata');
+      return {
+        id: doc._id,
+        date: d.format('YYYY-MM-DD'),
+        time: d.format('HH:mm'),
+        status: doc.status,
+        duration: doc.duration,
+        isPaid: doc.isPaid,
+        modeOfPayment: doc.paymentMode,
+        patientName: doc.patient?.name,
+        doctorName: doc.doctorUser?.name,
+        specialization: doc.doctor?.specialization,
+        hospitalName: doc.hospital?.name,
+        hospitalLocation: doc.hospital?.location,
+      };
+    });
+
     return res.json({
-      data: appointments,
+      data,
       pagination: {
         totalCount,
         currentPage: pageNum,
         pageSize,
-        totalPages: Math.ceil(totalCount / pageSize)
-      }
+        totalPages: Math.ceil(totalCount / pageSize),
+      },
     });
   } catch (err) {
     console.error('Error in getAdminAppointments:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
 
 
 const getAdminDashboardSummary = async (req, res) => {

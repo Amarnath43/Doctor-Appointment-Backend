@@ -48,7 +48,11 @@ const doctorSchema = new mongoose.Schema({
     type: String,
     enum: ['pending', 'active', 'blocked'],
     default: 'pending'
-  }
+  },
+  ratingAvg: { type: Number, default: 0 },
+ratingCount: { type: Number, default: 0 },
 }, { timestamps: true });
+
+doctorSchema.index({ ratingAvg: -1, ratingCount: -1 });
 
 module.exports = mongoose.model('Doctor', doctorSchema);

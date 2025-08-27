@@ -48,4 +48,7 @@ router.patch(
   c.editDoctorReply
 );
 
+router.delete('/reviews/:id', authMiddleware,
+  roleMiddleware(['user']),c.deleteReviewByUser)
+
 module.exports = router;

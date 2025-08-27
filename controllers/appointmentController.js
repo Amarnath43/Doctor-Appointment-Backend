@@ -8,7 +8,14 @@ const timezone = require('dayjs/plugin/timezone');
 dayjs.extend(utc);
 dayjs.extend(timezone);
 const mergeSlotToDateArray = require('../utils/mergeSlotToDateArray')
-const { sendAppointmentBookedEmail } = require('../emails/appointments'); // <- from earlier
+const {
+  sendAppointmentBookedEmail,
+  sendAppointmentCancelledEmail,
+  sendAppointmentRescheduledEmail,
+  sendDoctorAppointmentBookedEmail,
+  sendDoctorAppointmentCancelledEmail,
+  sendDoctorAppointmentRescheduledEmail,
+  safeSend, } = require('../emails/appointments'); // <- from earlier
 
 
 
@@ -91,7 +98,7 @@ const bookAppointment = async (req, res) => {
 
     const docEmail = fullAppt.doctorId?.userId?.email;
     if (docEmail) {
-      sendAppointmentBookedEmail(docEmail, {
+      sendDoctorAppointmentBookedEmail(docEmail, {
         patientName,
         doctorName,
         hospitalName,
@@ -196,7 +203,7 @@ const cancelAppointment = async (req, res) => {
       }).catch(console.error);
     }
     if (doctorEmail) {
-      sendAppointmentCancelledEmail(doctorEmail, {
+      sendDoctorAppointmentCancelledEmail(doctorEmail, {
         patientName,
         doctorName,
         slotISO,
@@ -478,7 +485,7 @@ const rescheduleAppointment = async (req, res) => {
       }).catch(console.error);
     }
     if (dEmail) {
-      sendAppointmentRescheduledEmail(dEmail, {
+      sendDoctorAppointmentRescheduledEmail(dEmail, {
         patientName: pName,
         doctorName: dName,
         oldSlotISO: oldISO,

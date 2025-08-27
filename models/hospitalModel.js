@@ -45,6 +45,8 @@ const hospitalSchema = new mongoose.Schema(
       weekdays: { type: String, trim: true },
       weekends: { type: String, trim: true },
     },
+     ratingAvg: { type: Number, default: 0 },
+ratingCount: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
