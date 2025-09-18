@@ -36,6 +36,7 @@ const getHospitalById = async (req, res) => {
             return res.status(404).json({ message: 'Hospital not found' });
         }
         hospital.images = toPublicUrls(hospital.images);
+        console.log(hospital);
         return res.status(200).json(hospital);
     } catch (err) {
         console.error('Error fetching hospital Data', err);

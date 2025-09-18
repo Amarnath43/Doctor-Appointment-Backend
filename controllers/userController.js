@@ -699,35 +699,54 @@ const getDoctorData = async (req, res) => {
   }
 
 }
+
+
 const appointmentHistory = async (req, res) => {
   try {
     const userIdObj = new mongoose.Types.ObjectId(req.user._id);
-    const status = String(req.query.status || '');
+    const bucket = String(req.query.bucket || 'upcoming'); // 'upcoming' | 'past' | 'cancelled'
 
     // pagination
-    const pageRaw = Number(req.query.page);
-    const limitRaw = Number(req.query.limit);
-    const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
-    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(50, limitRaw) : 10;
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
     const skip = (page - 1) * limit;
 
-    if (!['Confirmed', 'Completed', 'Cancelled'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status value' });
+    if (!['upcoming', 'past', 'cancelled'].includes(bucket)) {
+      return res.status(400).json({ error: 'Invalid bucket value' });
     }
 
-    const matchStage = { userId: userIdObj, status };
+    // 1) scope to this user
+    const preMatch = { userId: userIdObj };
+
+    // 2) bucket logic using stored UTC Date field `date` (your appointment datetime)
+    const postMatch =
+      bucket === 'cancelled'
+        ? { status: 'Cancelled' }
+        : bucket === 'upcoming'
+          ? { status: 'Confirmed', $expr: { $gte: ['$date', '$$NOW'] } }
+          : { // past
+              $or: [
+                { status: 'Completed' },
+                { status: 'Confirmed', $expr: { $lt: ['$date', '$$NOW'] } }
+              ]
+            };
 
     const [result] = await Appointment.aggregate([
-      { $match: matchStage },
+      { $match: preMatch },
+
+      // apply time+status bucket
+      { $match: postMatch },
+
       {
         $facet: {
           total: [{ $count: 'count' }],
           data: [
-            { $sort: { createdAt: -1 } },
+            // sort by appointment datetime (then createdAt as tiebreaker)
+            { $sort: { date: bucket === 'upcoming' ? 1 : -1, createdAt: -1 } },
             { $skip: skip },
             { $limit: limit },
 
-            // PATIENT (the booking user)
+            // PATIENT
             { $lookup: { from: 'users', localField: 'userId', foreignField: '_id', as: 'patientUser' } },
             { $unwind: { path: '$patientUser', preserveNullAndEmptyArrays: true } },
 
@@ -743,7 +762,7 @@ const appointmentHistory = async (req, res) => {
             { $lookup: { from: 'hospitals', localField: 'doctor.hospital', foreignField: '_id', as: 'hospital' } },
             { $unwind: { path: '$hospital', preserveNullAndEmptyArrays: true } },
 
-            // REVIEW (by appointmentId)
+            // REVIEW (this user's review for this appt)
             {
               $lookup: {
                 from: 'reviews',
@@ -754,11 +773,12 @@ const appointmentHistory = async (req, res) => {
                       $expr: {
                         $and: [
                           { $eq: ['$appointmentId', '$$apptId'] },
-                          { $eq: ['$patientId', '$$me'] }           // <- only this user's review
+                          { $eq: ['$patientId', '$$me'] }
                         ]
                       }
                     }
                   },
+                  { $sort: { createdAt: -1 } }, // defensive: latest if duplicates
                   {
                     $project: {
                       _id: 1,
@@ -769,27 +789,31 @@ const appointmentHistory = async (req, res) => {
                       patientId: 1
                     }
                   },
-                  { $limit: 1 }                                    // enforce one review per appt
+                  { $limit: 1 }
                 ],
                 as: 'review'
               }
             },
 
-            // normalized single object + existence flag (no unwind/null traps)
+            // normalize review[] -> review|null and add flags
             {
               $addFields: {
                 reviewExists: { $gt: [{ $size: '$review' }, 0] },
-                review: { $cond: [{ $gt: [{ $size: '$review' }, 0] }, { $first: '$review' }, null] }
+                review: {
+                  $cond: [
+                    { $gt: [{ $size: '$review' }, 0] },
+                    { $first: '$review' },
+                    null
+                  ]
+                }
               }
             },
-
-            // flags (now safe to read from `review`)
             {
               $set: {
                 canEdit: {
                   $and: [
                     '$reviewExists',
-                    { $eq: ['$review.patientId', userIdObj] }, // redundant but explicit
+                    { $eq: ['$review.patientId', userIdObj] },
                     {
                       $lte: [
                         {
@@ -814,10 +838,17 @@ const appointmentHistory = async (req, res) => {
               }
             },
 
-            // FINAL SHAPE (coerce review {} -> null and expose only needed fields)
+            // final shape
             {
               $project: {
-                _id: 1, date: 1, slot: 1, fee: 1, status: 1, createdAt: 1,
+                _id: 1,
+                date: 1,            // UTC Date of the appointment (includes slot)
+                slot: 1,            // keep if you still display it
+                fee: 1,
+                status: 1,
+                isPaid: 1,
+                paymentMode: 1,
+                createdAt: 1,
 
                 patient: {
                   _id: '$patientUser._id',
@@ -843,7 +874,6 @@ const appointmentHistory = async (req, res) => {
                 reviewExists: 1,
                 canEdit: 1,
                 canEditUntil: 1,
-
                 review: {
                   $cond: [
                     { $ne: ['$review._id', null] },
@@ -882,6 +912,7 @@ const appointmentHistory = async (req, res) => {
     res.status(500).json({ message: 'Error fetching Appointment History' });
   }
 };
+
 
 
 
@@ -966,6 +997,7 @@ const getHospitals = async (req, res) => {
         limit,
         total,
         pages: Math.ceil(total / limit),
+        hasMore: page * limit < total,
       },
     });
   } catch (err) {

@@ -177,16 +177,17 @@ exports.deleteReviewByUser = async (req, res) => {
 /* ---------------------------------------------
    GET /doctors/:doctorId/reviews (public)
 --------------------------------------------- */
+const { isValidObjectId, Types } = require('mongoose');
+
 exports.listDoctorReviews = async (req, res) => {
   try {
     const { doctorId } = req.params;
+    if (!isValidObjectId(doctorId)) {
+      return res.status(400).json({ message: 'Invalid doctorId' });
+    }
 
-    const pageRaw = Number(req.query.page);
-    const limitRaw = Number(req.query.limit);
-    const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
-    const limit = Number.isFinite(limitRaw)
-      ? Math.min(50, Math.max(1, limitRaw))
-      : 20;
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
     const [itemsRaw, total, avgAgg] = await Promise.all([
@@ -194,19 +195,22 @@ exports.listDoctorReviews = async (req, res) => {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .select(
-          '_id text rating_overall createdAt patientId doctor_reply'
-        )
+        .select('_id text rating_overall createdAt patientId doctor_reply doctorId')
         .populate({ path: 'patientId', select: 'name profilePicture' })
+        .populate({
+          path: 'doctorId',
+          select: 'userId', // only need userId from Doctor
+          populate: { path: 'userId', select: 'name profilePicture' } // fetch name & avatar
+        })
         .lean(),
       Review.countDocuments({ doctorId, status: 'approved' }),
       Review.aggregate([
-        { $match: { doctorId: new ObjectId(doctorId), status: 'approved' } },
+        { $match: { doctorId: new Types.ObjectId(doctorId), status: 'approved' } },
         { $group: { _id: null, avg: { $avg: '$rating_overall' } } },
       ]),
     ]);
 
-    const items = itemsRaw.map((r) => ({
+    const items = itemsRaw.map(r => ({
       _id: r._id,
       rating: r.rating_overall,
       comment: r.text,
@@ -215,16 +219,21 @@ exports.listDoctorReviews = async (req, res) => {
         name: r.patientId?.name || 'Patient',
         profilePicture: r.patientId?.profilePicture,
       },
+      doctor: {
+        name: r.doctorId?.userId?.name || null,
+        profilePicture: r.doctorId?.userId?.profilePicture || null,
+      },
       doctor_reply: r.doctor_reply,
     }));
 
-    const avgRating = avgAgg[0]?.avg || 0;
+    const avgRating = Number((avgAgg[0]?.avg || 0).toFixed(1));
     return res.json({ items, total, page, limit, avgRating });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 /* ---------------------------------------------
    GET /hospitals/:hospitalId/reviews (public)

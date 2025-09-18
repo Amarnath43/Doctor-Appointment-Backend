@@ -571,7 +571,21 @@ const getDoctorAnalytics = async (req, res) => {
 const getDoctorDetails = async (req, res) => {
   try {
     const { doctorId } = req.params;
-    const doctor = await Doctor.findById(doctorId).populate({
+
+    const projection = {
+      _id: 1,
+      availability: 1,
+      experience: 1,
+      bio: 1,
+      ratingCount: 1,
+      ratingAvg: 1,
+      specialization: 1,
+      fee: 1,
+      userId: 1,
+      hospital: 1,
+    };
+
+    const doctor = await Doctor.findById(doctorId, projection).populate({
       path: 'userId',
       select: 'name email phone profilePicture'
     }).populate({
@@ -610,7 +624,7 @@ const getDoctorDetails = async (req, res) => {
       })
       // 3) remove any day that now has zero slots
       .filter(day => day.slots.length > 0);
-
+      console.log(doctor)
     return res.status(200).json(doctor);
   } catch (err) {
     console.error('Error fetching availability:', err);
@@ -914,12 +928,21 @@ const listMyDoctorReviews = async (req, res) => {
     .skip(skip)
     .limit(limit)
     .populate({
-      path: 'patientId',       // field in Review model
-      select: 'name profilePicture', // only send required fields
-    })
+      path: 'patientId',
+      select: 'name profilePicture', 
+    }).populate({
+          path: 'doctorId', 
+          select: 'userId', 
+          populate: {       
+            path: 'userId',
+            select: 'name profilePicture'
+          },
+        })
     .lean(),
   Review.countDocuments(q),
 ]);
+
+console.log("hello")
 
 
     return res.json({ items, total, page, limit });

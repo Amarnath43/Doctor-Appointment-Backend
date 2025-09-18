@@ -22,7 +22,7 @@ router.get('/all-specializations', allSpecializations);
 
 router.get('/hospitals',getHospitals);
 
-router.get('/appointments',authMiddleware, roleMiddleware(['user']),appointmentHistory)
+router.get('/appointments/history',authMiddleware, roleMiddleware(['user']),appointmentHistory)
 
 router.post('/create-admin', verifyAdminSecret, createAdmin);
 

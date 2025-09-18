@@ -3,7 +3,7 @@ const nodemailer = require('nodemailer');
 const EMAIL_USER = process.env.SES_SMTP_USER; 
 const EMAIL_PASS = process.env.SES_SMTP_PASS;
 const SES_REGION = process.env.SES_REGION || "ap-south-1"; 
-const MAIL_FROM  = `QuickMediLink <no-reply@quickmedilink.in>`; 
+const MAIL_FROM  = `QuickMediLink <noreply@quickmedilink.in>`; 
 
 const transporter = nodemailer.createTransport({
   host: `email-smtp.${SES_REGION}.amazonaws.com`,
