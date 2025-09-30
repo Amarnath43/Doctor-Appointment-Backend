@@ -1,21 +1,12 @@
 const { createClient } = require('redis');
 
-const redisUrl = 'redis://:Amar234@%23@127.0.0.1:6379';
+const redis = createClient(); // localhost:6379 for Docker
 
-const redisClient = createClient({
-  url: redisUrl
-});
+redis.on('error', (err) => console.error('❌ Redis Client Error:', err));
 
-
-redisClient.on('error', (err) => console.error('❌ Redis Client Error:', err));
-
+// Connect immediately when the app starts
 (async () => {
-  try {
-    await redisClient.connect();
-    console.log('✅ Connected to Redis successfully!');
-  } catch (err) {
-    console.error('🔥 Failed to connect to Redis:', err);
-  }
+  await redis.connect();
 })();
 
-module.exports = redisClient;
+module.exports = redis;

@@ -12,6 +12,7 @@ const hospitalRoute=require('./routes/hospitalRoute');
 const uploadRoutes=require('./routes/uploadRoutes');
 const reviewRoute=require('./routes/reviewRoute');
 const adminReviewsRouter = require('./routes/admin.review.routes');
+const canonicalMapsRouter= require("./routes/canonicalMapsLink.js");
 const connectDB =require('./config/db')
 dotenv.config();
 
@@ -42,7 +43,8 @@ app.use('/', (req,res,next)=>{
     console.log("user opened website");
     next();
 })
-app.use('/api/uploads',uploadRoutes)
+app.use('/api/uploads',uploadRoutes);
+app.use("/api/utils", canonicalMapsRouter);
 
 
 // serve everything in ./uploads under the /uploads URL path

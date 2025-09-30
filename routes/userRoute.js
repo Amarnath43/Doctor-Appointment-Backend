@@ -1,6 +1,6 @@
 const express=require('express');
 const router=express.Router();
-const {registerUser,signin, searchDoctors,editProfile, getHospitals,searchHospitals, allSpecializations,  appointmentHistory, createAdmin, resendOTP, verifyOTP, resetPasswordWithOTP, sendPasswordResetOTP}=require('../controllers/userController')
+const {registerUser,signin, searchDoctors,editProfile, getHospitals,searchHospitals, allSpecializations,  appointmentHistory, createAdmin, resendOTP, verifyOTP, resetPasswordWithOTP, sendPasswordResetOTP, getProfile}=require('../controllers/userController')
 const {myAppointments}=require('../controllers/appointmentController')
 const authMiddleware=require('../middleware/authMiddleware');
 const roleMiddleware=require('../middleware/roleMiddleware');
@@ -34,5 +34,7 @@ router.post('/resend-otp',resendOTP)
 router.post('/forgot-password/send-otp',sendPasswordResetOTP)
 
 router.post('/forgot-password/verify', resetPasswordWithOTP)
+
+router.get('/profile',authMiddleware, roleMiddleware(['user']), getProfile)
 
 module.exports=router

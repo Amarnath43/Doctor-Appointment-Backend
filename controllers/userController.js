@@ -9,9 +9,9 @@ const redis = require('../utils/redis');
 const { deleteImageFromS3 } = require('../utils/s3Client');
 const { makePublicUrlFromKey } = require('../utils/s3PublicUrl');
 const mongoose = require('mongoose');
-const {sendOTPEmail}=require('../emails/otp')
+const { sendOTPEmail } = require('../emails/otp')
 const { sendWelcomeUserEmail } = require('../emails/welcomeUser.js');
-
+const buildUserResponse = require('../utils/buildUserResponse');
 
 
 const registerUser = async (req, res) => {
@@ -45,6 +45,7 @@ const registerUser = async (req, res) => {
     }
     try {
       await redis.set(`signup:${email}`, JSON.stringify(data), 'EX', 600);
+      console.log(email)
     } catch (err) {
       console.error('❌ Redis Error:', err);
       return res.status(500).json({ message: 'Internal error while saving OTP' });
@@ -66,6 +67,7 @@ const verifyOTP = async (req, res) => {
 
   try {
     email = String(email).toLowerCase();
+    console.log(email, otp, isLoginFlow);
     otp = String(otp);
     const key = isLoginFlow ? `signin:${email}` : `signup:${email}`;
     const tempData = await redis.get(key);
@@ -74,9 +76,9 @@ const verifyOTP = async (req, res) => {
       return res.status(400).json({ message: 'OTP expired or not requested' });
 
     const parsed = JSON.parse(tempData);
-    
 
-     const expiryMs = typeof parsed.otpExpiry === "string"
+
+    const expiryMs = typeof parsed.otpExpiry === "string"
       ? new Date(parsed.otpExpiry).getTime()
       : Number(parsed.otpExpiry);
     if (expiryMs < Date.now()) {
@@ -161,8 +163,8 @@ const verifyOTP = async (req, res) => {
         await user.save();
       await redis.del(key);
 
-      
-  await sendWelcomeUserEmail(user.email, { name: user.name });
+
+      await sendWelcomeUserEmail(user.email, { name: user.name });
 
 
       return res.status(201).json({ message: 'User registered successfully' });
@@ -197,7 +199,7 @@ const resendOTP = async (req, res) => {
     }
 
     const parsed = JSON.parse(redisData);
-    
+
 
     // Rate limit: block resend if within 60 seconds
     if (parsed.lastOtpSentAt && Date.now() - parsed.lastOtpSentAt < 60000) {
@@ -222,8 +224,8 @@ const resendOTP = async (req, res) => {
     await redis.set(key, JSON.stringify(updatedData), 'EX', 600);
 
     // Send via email
-    
-    await sendOTPEmail(email, { otp:newOtp });
+
+    await sendOTPEmail(email, { otp: newOtp });
 
     return res.status(200).json({ message: 'OTP resent successfully' });
 
@@ -283,9 +285,9 @@ const signin = async (req, res) => {
     };
 
     await redis.set(`signin:${email}`, JSON.stringify(redisData), 'EX', 600);
-    await sendOTPEmail(email, {otp,name:existing.name});
+    await sendOTPEmail(email, { otp, name: existing.name });
 
-    res.status(200).json({ message: 'OTP sent to email for login verification', role:existing.role });
+    res.status(200).json({ message: 'OTP sent to email for login verification', role: existing.role });
 
 
   } catch (err) {
@@ -345,6 +347,74 @@ const resetPasswordWithOTP = async (req, res) => {
   }
 }
 
+const getProfile = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const existing = await User.findById(userId).lean();
+    if (!existing) return res.status(404).json({ message: 'User not found' });
+
+    const responseData = {
+      id: existing._id,
+      name: existing.name,
+      email: existing.email,
+      phone: existing.phone,
+      role: existing.role,
+      status: {
+        user: existing.status
+      },
+      profilePicture: existing.profilePicture || ''
+    };
+
+
+
+    if (existing.role === 'user') {
+
+      responseData.profile = {
+        gender: existing.gender || null,
+        dob: existing.dob || null,
+        bloodGroup: existing.bloodGroup || null,
+        address: existing.address || ''
+
+      };
+
+    }
+
+
+
+    if (existing.role === 'doctor') {
+      const doctor = await Doctor.findOne({ userId: existing._id }).populate('hospital');
+      if (!doctor) {
+        return res.status(400).json({ message: 'Doctor profile not found.' });
+      }
+
+      responseData.status.doctor = doctor.status;
+      responseData.specialization = doctor.specialization;
+      responseData.experience = doctor.experience;
+      responseData.fee = doctor.fee;
+      responseData.bio = doctor.bio;
+
+
+      if (doctor.hospital) {
+        responseData.hospital = {
+          name: doctor.hospital.name,
+          location: doctor.hospital.location,
+          phoneNumber: doctor.hospital.phoneNumber,
+          googleMapsLink: doctor.hospital.googleMapsLink
+
+        };
+
+      }
+
+    }
+    return res.status(200).json(responseData);
+
+
+  }
+  catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: 'server error while fetching profile data' })
+  }
+}
 
 const searchDoctors = async (req, res) => {
   try {
@@ -471,49 +541,48 @@ const editProfile = async (req, res) => {
     const data = req.body;
 
     const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
 
-    const userFields = {
-      name: data.name,
-    };
+    // --- Update User Fields ---
+    user.name = data.name;
 
-    if (data.profilePicture) {
-      if (user.profilePicture && user.profilePicture !== data.profilePicture) {
-
-        console.log("profile key" + user.profilePicture);
-        console.log("key from frontend" + data.profilePicture)
-
-        await deleteImageFromS3(user.profilePicture);
+    // FIX: Correctly handle profile picture update AND deletion
+    if (data.profilePicture !== undefined) {
+      const oldPictureKey = user.profilePicture;
+      // If a new picture is being uploaded OR the picture is being removed (empty string)
+      // and an old picture existed, delete the old one from S3.
+      if (oldPictureKey && oldPictureKey !== data.profilePicture) {
+        await deleteImageFromS3(oldPictureKey);
       }
-      userFields.profilePicture = data.profilePicture;
+      user.profilePicture = data.profilePicture;
     }
-
+    
     if (role === 'user') {
-      userFields.gender = data.gender;
-      userFields.dob = data.dob;
-      userFields.bloodGroup = data.bloodGroup;
-      userFields.address = data.address;
+      user.gender = data.gender;
+      user.dob = data.dob;
+      user.bloodGroup = data.bloodGroup;
+      user.address = data.address;
     }
 
-    // ✅ Password change handling
+    // --- Password Change Logic ---
     if (data.changePassword) {
       if (!data.oldPassword || !data.newPassword) {
         return res.status(400).json({ message: 'Old and new passwords are required' });
       }
-
-      const isMatch = await user.matchPassword(data.oldPassword);
+      // Assuming user.matchPassword method exists on your model
+      const isMatch = await bcrypt.compare(data.oldPassword, user.password);
       if (!isMatch) {
         return res.status(401).json({ message: 'Incorrect current password' });
       }
-
+      // Assuming a pre-save hook on your model handles hashing
       user.password = data.newPassword;
-      user._passwordIsHashed = false; // Optional: to avoid rehashing if already hashed
-      await user.save();
     }
 
-    await User.findByIdAndUpdate(userId, userFields);
+    const updatedUserDoc = await user.save();
 
-    let updatedDoctor = null;
+    // --- Update Doctor-specific Fields (if applicable) ---
     if (role === 'doctor') {
       const doctorFields = {
         specialization: data.specialization,
@@ -521,50 +590,11 @@ const editProfile = async (req, res) => {
         fee: data.fee,
         bio: data.bio,
       };
-
-      updatedDoctor = await Doctor.findOneAndUpdate({ userId }, doctorFields, {
-        new: true,
-      }).populate('hospital');
+      await Doctor.findOneAndUpdate({ userId }, doctorFields);
     }
-
-    const updatedUser = await User.findById(userId).lean();
-
-    const responseData = {
-      id: updatedUser._id,
-      name: updatedUser.name,
-      email: updatedUser.email,
-      phone: updatedUser.phone,
-      role: updatedUser.role,
-      profilePicture: updatedUser.profilePicture || '',
-      status: {
-        user: updatedUser.status,
-        ...(role === 'doctor' && { doctor: updatedDoctor?.status }),
-      },
-    };
-
-    if (role === 'user') {
-      responseData.profile = {
-        gender: updatedUser.gender || null,
-        dob: updatedUser.dob || null,
-        bloodGroup: updatedUser.bloodGroup || null,
-        address: updatedUser.address || '',
-      };
-    }
-
-    if (role === 'doctor' && updatedDoctor) {
-      responseData.specialization = updatedDoctor.specialization;
-      responseData.experience = updatedDoctor.experience;
-      responseData.fee = updatedDoctor.fee;
-      responseData.bio = updatedDoctor.bio;
-      responseData.availability = updatedDoctor.availability;
-
-      responseData.hospital = {
-        name: updatedDoctor.hospital?.name || '',
-        location: updatedDoctor.hospital?.location || '',
-        phoneNumber: updatedDoctor.hospital?.phoneNumber || '',
-        googleMapsLink: updatedDoctor.hospital?.googleMapsLink || '',
-      };
-    }
+    
+    // Build and send the final response
+    const responseData = await buildUserResponse(updatedUserDoc);
 
     return res.status(200).json({
       message: 'Profile updated successfully',
@@ -700,7 +730,6 @@ const getDoctorData = async (req, res) => {
 
 }
 
-
 const appointmentHistory = async (req, res) => {
   try {
     const userIdObj = new mongoose.Types.ObjectId(req.user._id);
@@ -725,11 +754,11 @@ const appointmentHistory = async (req, res) => {
         : bucket === 'upcoming'
           ? { status: 'Confirmed', $expr: { $gte: ['$date', '$$NOW'] } }
           : { // past
-              $or: [
-                { status: 'Completed' },
-                { status: 'Confirmed', $expr: { $lt: ['$date', '$$NOW'] } }
-              ]
-            };
+            $or: [
+              { status: 'Completed' },
+              { status: 'Confirmed', $expr: { $lt: ['$date', '$$NOW'] } }
+            ]
+          };
 
     const [result] = await Appointment.aggregate([
       { $match: preMatch },
@@ -1013,5 +1042,5 @@ const getHospitals = async (req, res) => {
 module.exports = {
   registerUser, signin, searchDoctors, editProfile, searchHospitals, allSpecializations,
   getDoctorData, appointmentHistory, createAdmin, verifyOTP, resendOTP,
-  resetPasswordWithOTP, sendPasswordResetOTP, getHospitals
+  resetPasswordWithOTP, sendPasswordResetOTP, getHospitals, getProfile
 }
