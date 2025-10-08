@@ -22,7 +22,8 @@ const { sendWelcomeDoctorEmail } = require('../emails/welcomeDoctor');
 
 const registerDoctor = async (req, res) => {
   const formData = req.body;
-  const { email, phone } = formData;
+  const email = (formData.email || '').toLowerCase().trim();
+  const phone = (formData.phone || '').trim();
 
   if (!email) {
     return res.status(400).json({ field: 'email', message: 'Email is required' });
@@ -103,7 +104,7 @@ const resendDoctorOtp = async (req, res) => {
 
     await redis.set(redisKey, JSON.stringify(updatedData), { EX: 600 });
 
-    await sendEmail(email, newOtp);
+    await sendOTPEmail(email, newOtp);
 
     res.status(200).json({ message: 'OTP resent successfully.' });
 
