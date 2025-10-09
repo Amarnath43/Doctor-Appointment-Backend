@@ -291,6 +291,7 @@ const signin = async (req, res) => {
 
 
   } catch (err) {
+    if (e?.__CANCEL__ || e?._silenced) return;
     console.error('Signin error:', err);
     return res.status(500).json({ message: 'Signin error from server' });
   }
@@ -315,7 +316,7 @@ const sendPasswordResetOTP = async (req, res) => {
   user.otpExpiry = Date.now() + 10 * 60 * 1000;
   await user.save();
 
-  await sendOTPEmail(email, OTP);
+  await sendOTPEmail(email, {otp:OTP, name: user.name});
   res.status(200).json({ message: 'OTP sent to email for password reset' });
 }
 

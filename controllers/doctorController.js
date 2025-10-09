@@ -254,9 +254,6 @@ const verifyDoctorOtpAndRegister = async (req, res) => {
 
 
 
-// POST: Set doctor availability
-
-
 const doctorAvailability = async (req, res) => {
   try {
     const doctorId = req.user._id;

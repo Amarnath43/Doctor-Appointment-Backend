@@ -1,3 +1,5 @@
+const Doctor = require('../models/doctorModel');
+
 const buildUserResponse = async (userDoc) => {
   // This function creates the JSON structure your frontend expects.
   const responseData = {

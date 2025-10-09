@@ -14,6 +14,7 @@ const {
   getTodayAppointments,
   listMyDoctorReviews
 } = require('../controllers/doctorController');
+const { getProfile } = require('../controllers/userController');
 const {getDoctorAppointments}=require('../controllers/appointmentController');
 const { editProfile } = require('../controllers/userController');
 const validateRequest = require('../middleware/validateReqMiddleware');
@@ -57,6 +58,8 @@ router.get(
   roleMiddleware(['doctor']),
   listMyDoctorReviews
 );
+
+router.get('/profile',authMiddleware, roleMiddleware(['doctor']), getProfile)
 // ⚠️ Always last: dynamic route
 router.get('/:doctorId', getDoctorDetails);
 module.exports = router;
