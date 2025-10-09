@@ -19,7 +19,7 @@ const editUserProfileSchema = Joi.object({
   phone: Joi.string().pattern(/^[6-9]{1}[0-9]{9}$/),
   dob: Joi.date().iso().optional(),
   gender: Joi.string().valid('Male', 'Female', 'Other').optional(),
-  bloodGroup: Joi.string().valid('A+', 'A-', 'B+', 'B-', 'O+', 'O-', 'AB+', 'AB-').optional(),
+  bloodGroup: Joi.string().valid('A+', 'A-', 'B+', 'B-', 'O+', 'O-', 'AB+', 'AB-', 'Unknown').optional(),
   address: Joi.string().trim().min(5).max(100).optional(),
   profilePicture: Joi.string().optional().allow(''),
   changePassword:Joi.boolean().optional(),
