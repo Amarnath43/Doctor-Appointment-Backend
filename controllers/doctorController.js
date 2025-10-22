@@ -838,28 +838,30 @@ const listMyDoctorReviews = async (req, res) => {
 
     const [items, total] = await Promise.all([
   Review.find(q)
-    .sort(sortMap[sort] || sortMap.newest)
-    .skip(skip)
-    .limit(limit)
-    .populate({
-      path: 'patientId',
-      select: 'name profilePicture', 
-    }).populate({
-          path: 'doctorId', 
-          select: 'userId', 
-          populate: {       
-            path: 'userId',
-            select: 'name profilePicture'
-          },
-        })
-    .lean(),
+  .sort(sortMap[sort] || sortMap.newest)
+  .skip(skip)
+  .limit(limit)
+  .populate({ path: 'patientId', select: 'name profilePicture' })
+  .populate({
+    path: 'doctorId',
+    select: 'userId',  
+    populate: {
+      path: 'userId',
+      select: 'name profilePicture'
+    },
+  })
+  .lean(),
+
   Review.countDocuments(q),
 ]);
 
-console.log("hello")
+
+rating_avg=doctor.ratingAvg;
+rating_count=doctor.ratingCount;
 
 
-    return res.json({ items, total, page, limit });
+
+    return res.json({ items, total, page, limit,rating_avg, rating_count });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ message: 'Server error' });

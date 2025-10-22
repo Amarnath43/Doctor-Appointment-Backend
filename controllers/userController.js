@@ -291,7 +291,7 @@ const signin = async (req, res) => {
 
 
   } catch (err) {
-    if (e?.__CANCEL__ || e?._silenced) return;
+    if (err?.__CANCEL__ || err?._silenced) return;
     console.error('Signin error:', err);
     return res.status(500).json({ message: 'Signin error from server' });
   }

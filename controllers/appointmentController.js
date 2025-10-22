@@ -110,6 +110,7 @@ const bookAppointment = async (req, res) => {
 
     return res.status(201).json({ message: 'Booked!', fullAppt });
   } catch (err) {
+    console.log(err)
     await session.abortTransaction(); session.endSession(); 
     if (err.code === 11000) {
       return res.status(409).json({ message: 'That slot was just taken. Please pick another.' });
