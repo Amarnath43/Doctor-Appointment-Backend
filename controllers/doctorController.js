@@ -556,28 +556,52 @@ const updateAppointmentStatus = async (req, res) => {
       return res.status(400).json({ message: 'Invalid status' });
     }
 
-    // Find the appointment
     const appointment = await Appointment.findById(id);
     if (!appointment) {
       return res.status(404).json({ message: 'Appointment not found' });
     }
 
-    // Update status
+    // ------------------------------
+    // 🔒 Role-based access control
+    // ------------------------------
+
+    // If doctor, allow only their own appointments
+    if (req.user?.role === 'doctor') {
+      if (appointment.doctorId.toString() !== req.user.id.toString()) {
+        return res.status(403).json({
+          message: "You are not allowed to update another doctor's appointment"
+        });
+      }
+    }
+
+    // If user role is not admin or doctor → block
+    if (req.user?.role !== 'admin' && req.user?.role !== 'doctor') {
+      return res.status(403).json({ message: 'Forbidden: Unauthorized user' });
+    }
+
+    // ---------------------------------------
+    // ✏️ Update appointment
+    // ---------------------------------------
     appointment.status = status;
 
-    // If marked as completed, mark it as paid
+    // Auto-mark as paid if completed
     if (status === 'Completed') {
       appointment.isPaid = true;
     }
 
     await appointment.save();
 
-    res.json({ message: 'Status updated', appointment });
+    return res.json({
+      success: true,
+      message: "Appointment status updated successfully"
+    });
+
   } catch (error) {
-    console.error('Update status error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error("Update appointment status error:", error);
+    res.status(500).json({ message: "Server error" });
   }
 };
+
 
 
 const getDoctorDashboardSummary = async (req, res) => {

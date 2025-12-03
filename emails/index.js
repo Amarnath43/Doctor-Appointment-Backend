@@ -1,26 +1,38 @@
-const nodemailer = require('nodemailer');
+const formData = require('form-data');
+const Mailgun = require('mailgun.js');
 
-const EMAIL_USER = process.env.SES_SMTP_USER; 
-const EMAIL_PASS = process.env.SES_SMTP_PASS;
-const SES_REGION = process.env.SES_REGION || "ap-south-1"; 
-const MAIL_FROM  = `QuickMediLink <noreply@quickmedilink.online>`; 
+const MAILGUN_API_KEY = process.env.MAILGUN_API_KEY; 
+const MAILGUN_DOMAIN = process.env.MAILGUN_DOMAIN;
+const MAIL_FROM = `QuickMediLink <noreply@mg.quickmedilink.online>`; 
 
-const transporter = nodemailer.createTransport({
-  host: `email-smtp.${SES_REGION}.amazonaws.com`,
-  port: 587, // TLS
-  secure: false,
-  auth: { user: EMAIL_USER, pass: EMAIL_PASS }
+const mailgun = new Mailgun(formData);
+
+const mg = mailgun.client({
+  username: 'api',
+  key: MAILGUN_API_KEY,
 });
 
 
 async function sendEmail({ to, subject, html, text }) {
-  return transporter.sendMail({
+  if (!MAILGUN_API_KEY || !MAILGUN_DOMAIN) {
+    throw new Error("Mailgun credentials (API Key or Domain) are not configured.");
+  }
+  
+  const messageData = {
     from: MAIL_FROM,
-    to,
-    subject,
-    html,
-    text
-  });
+    to: to,
+    subject: subject,
+    html: html,
+    text: text,
+  };
+
+  try {
+    const response = await mg.messages.create(MAILGUN_DOMAIN, messageData);
+    return response; 
+  } catch (error) {
+    console.error("Mailgun API Send Error:", error);
+    throw error;
+  }
 }
 
 module.exports = { sendEmail };
